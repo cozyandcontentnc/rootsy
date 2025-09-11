@@ -1,9 +1,11 @@
 {
   "expo": {
-    "name": "rootsy",
+    "name": "Rootsy",
     "slug": "rootsy",
     "version": "1.0.0",
     "orientation": "portrait",
+    "scheme": "rootsy",
+    "platforms": ["ios", "android", "web"],
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
@@ -12,9 +14,7 @@
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
-    "ios": {
-      "supportsTablet": true
-    },
+    "ios": { "supportsTablet": true },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -22,8 +22,16 @@
       },
       "edgeToEdgeEnabled": true
     },
+
     "web": {
+      "bundler": "metro",
+      "output": "static",
       "favicon": "./assets/favicon.png"
-    }
+    },
+
+    "plugins": ["expo-router"],
+    "experiments": { "typedRoutes": true },
+
+    "assetBundlePatterns": ["**/*"]
   }
 }
