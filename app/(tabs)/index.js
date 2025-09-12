@@ -14,7 +14,7 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 import * as Location from "expo-location";
-import Card from "../../components/Card";
+// import Card from "../../components/Card"; // no longer used
 import { getWeather } from "../../src/weather";
 import { auth, db } from "../../src/firebase";
 import {
@@ -30,6 +30,8 @@ import {
   serverTimestamp,
   limit,
 } from "firebase/firestore";
+import SeedPacket from "../../components/SeedPacket";
+import { useWindowDimensions } from "react-native";
 
 /** Theme */
 const C = {
@@ -51,11 +53,55 @@ const WX_TIMEOUT_MS = 4000;
 const withTimeout = (p, ms) =>
   Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
 
+/** Layout */
+const CONTAINER_HPADDING = 12; // matches styles.container horizontal padding
+const H_GAP = 10;              // desired horizontal space *between* packets
+
 /** Helpers */
 function startOfToday() { const d = new Date(); d.setHours(0,0,0,0); return d; }
 function endOfToday() { const d = new Date(); d.setHours(23,59,59,999); return d; }
+function isoDay(d) { return d.toISOString().slice(0,10); }
+function isFiniteNum(n){ return typeof n === "number" && isFinite(n); }
+function firstNum(...vals){ for (const v of vals){ if (isFiniteNum(v)) return v; } return null; }
 function numOrDash(n, suffix = "") { return n == null ? "—" : `${Math.round(n)}${suffix}`; }
 function precipOrDash(n) { if (n == null) return "—"; return `${n.toFixed(n > 0 && n < 1 ? 2 : 1)}"`; }
+
+/** Compute min/max for *today* from hourly if daily fields are missing */
+function computeFromHourlyToday(wx, op = "max") {
+  const temps = wx?.hourly?.temperature_2m;
+  const times = wx?.hourly?.time;
+  if (!Array.isArray(temps) || !Array.isArray(times) || temps.length !== times.length) return null;
+  const today = isoDay(startOfToday());
+  const todayTemps = [];
+  for (let i = 0; i < times.length; i++) {
+    if (typeof times[i] === "string" && times[i].startsWith(today)) {
+      const t = temps[i];
+      if (isFiniteNum(t)) todayTemps.push(t);
+    }
+  }
+  if (!todayTemps.length) return null;
+  return op === "min" ? Math.min(...todayTemps) : Math.max(...todayTemps);
+}
+
+/** Tiny seasonal tagline */
+function getSeasonTagline(date = new Date()){
+  const m = date.getMonth(); // 0-11
+  const day = date.getDate();
+  const seasonal = [
+    "Seed • Nurture • Bloom",
+    "Tend little things often",
+    "Grow where you’re planted",
+    "Small steps, steady roots",
+  ];
+  let season = "Season of Growth";
+  if (m<=1 || (m===2 && day<20)) season = "Winter Rest";
+  else if (m<5 || (m===5 && day<21)) season = "Spring Planting";
+  else if (m<8 || (m===8 && day<23)) season = "Summer Care";
+  else season = "Fall Harvest";
+
+  const tag = seasonal[day % seasonal.length];
+  return `${season} • ${tag}`;
+}
 
 export default function Home() {
   const router = useRouter();
@@ -136,6 +182,25 @@ export default function Home() {
     return () => unsub();
   }, []);
 
+  // --- Beds (live) ---
+  const [beds, setBeds] = useState(null); // null = loading
+  useEffect(() => {
+    const uid = auth.currentUser?.uid;
+    if (!uid) { setBeds([]); return; }
+    const qRef = query(
+      collection(db, "beds"),
+      where("ownerId", "==", uid),
+      orderBy("name", "asc"),
+      limit(24)
+    );
+    const unsub = onSnapshot(
+      qRef,
+      (snap) => setBeds(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      () => setBeds([]) // fallback on error
+    );
+    return () => unsub();
+  }, []);
+
   // --- GEO + WEATHER ---
   useEffect(() => {
     (async () => {
@@ -156,13 +221,24 @@ export default function Home() {
     })();
   }, []);
 
-  const minToday = wx?.daily?.temperature_2m_min?.[0] ?? null;
-  const maxToday = wx?.daily?.temperature_2m_max?.[0] ?? null;
+  // === Robust daily min/max with fallbacks ===
+  const minToday = useMemo(() => firstNum(
+    wx?.daily?.temperature_2m_min?.[0],
+    wx?.daily?.apparent_temperature_min?.[0],
+    computeFromHourlyToday(wx, "min")
+  ), [wx]);
+
+  const maxToday = useMemo(() => firstNum(
+    wx?.daily?.temperature_2m_max?.[0],
+    wx?.daily?.apparent_temperature_max?.[0],
+    computeFromHourlyToday(wx, "max")
+  ), [wx]);
+
   const precipToday = wx?.daily?.precipitation_sum?.[0] ?? null;
 
   const frostOutlook = useMemo(() => {
     const mins = wx?.daily?.temperature_2m_min ?? [];
-    const next3 = mins.slice(0, 3);
+    const next3 = mins.slice(0, 3).filter(isFiniteNum);
     if (!next3.length) return { level: "—", msg: "No forecast data." };
     const min3 = Math.min(...next3);
     if (min3 <= 32) return { level: "Frost", msg: "Protect tender plants overnight." };
@@ -170,15 +246,40 @@ export default function Home() {
     return { level: "None", msg: "No frost expected in the next few nights." };
   }, [wx]);
 
+  // Dynamic header text
+  const displayName = auth.currentUser?.displayName || "Gardener";
+  const greeting = useMemo(() => {
+    const h = new Date().getHours();
+    if (h < 12) return "Good morning";
+    if (h < 18) return "Good afternoon";
+    return "Good evening";
+  }, []);
+  const seasonTag = useMemo(() => getSeasonTagline(), []);
+
+  // 🔷 Even spacing across the row
+  const { width: screenW } = useWindowDimensions();
+  const cols = useMemo(() => {
+    if (screenW < 420) return 2;
+    if (screenW >= 1100) return 6;
+    return 4;
+  }, [screenW]);
+
+  const tilePx = useMemo(() => {
+    const available = screenW - (CONTAINER_HPADDING * 2);
+    const totalGap = H_GAP * (cols - 1);
+    const w = Math.floor((available - totalGap) / cols);
+    return Math.max(100, w);
+  }, [screenW, cols]);
+
   const plantOfDay = useMemo(() => {
     const plants = [
-      { name: "Basil", tip: "Pinch tops to keep it bushy; avoid flowering.", icon: "🌿" },
-      { name: "Tomato", tip: "Water deeply; mulch to prevent splash.", icon: "🍅" },
-      { name: "Lavender", tip: "Full sun, sharp drainage; trim after blooms.", icon: "💜" },
-      { name: "Mint", tip: "Grow in containers to limit spread.", icon: "🌱" },
-      { name: "Strawberry", tip: "Remove runners for bigger berries.", icon: "🍓" },
-      { name: "Rosemary", tip: "Let soil dry slightly between waterings.", icon: "🌿" },
-      { name: "Marigold", tip: "Deadhead to extend blooms & deter pests.", icon: "🌼" },
+      { name: "Basil",     tip: "Pinch tops to keep it bushy; avoid flowering.", icon: "🌿" },
+      { name: "Tomato",    tip: "Water deeply; mulch to prevent splash.",        icon: "🍅" },
+      { name: "Lavender",  tip: "Full sun, sharp drainage; trim after blooms.",  icon: "💜" },
+      { name: "Mint",      tip: "Grow in containers to limit spread.",           icon: "🌱" },
+      { name: "Strawberry",tip: "Remove runners for bigger berries.",            icon: "🍓" },
+      { name: "Rosemary",  tip: "Let soil dry slightly between waterings.",      icon: "🌿" },
+      { name: "Marigold",  tip: "Deadhead to extend blooms & deter pests.",      icon: "🌼" },
     ];
     const i = new Date().getDate() % plants.length;
     return plants[i];
@@ -195,27 +296,15 @@ export default function Home() {
   return (
     <ImageBackground
       source={require("../../assets/bg-garden-paper.jpg")}
-      resizeMode="stretch"
+      resizeMode="cover"
       style={{ flex: 1, width: "100%", height: "100%" }}
       imageStyle={{ opacity: 0.85 }}
     >
       <ScrollView contentContainerStyle={styles.container}>
-        {/* HERO */}
-        <View style={styles.heroWrap}>
-          <View style={styles.heroEmojiCol}>
-            <Text style={styles.heroEmoji}>🌿</Text>
-            <Text style={styles.heroEmojiSmall}>🪴</Text>
-          </View>
-
-          <View style={{ flex: 1 }}>
-            <Text style={styles.heroTitle}>Rootsy</Text>
-            <Text style={styles.heroSub}>Tend your garden, season by season.</Text>
-            {coords ? (
-              <Text style={styles.heroWx}>
-                Today: low {numOrDash(minToday, "°F")} • high {numOrDash(maxToday, "°F")} • precip {precipOrDash(precipToday)}
-              </Text>
-            ) : null}
-          </View>
+        {/* ===== Top strip: compact, useful, dynamic ===== */}
+        <View style={styles.topStrip}>
+          <Text style={styles.topStripGreeting}>{greeting}, {displayName} 👋</Text>
+          <Text style={styles.topStripTag}>{seasonTag}</Text>
         </View>
 
         {/* OVERDUE ALERT STRIP */}
@@ -232,133 +321,190 @@ export default function Home() {
           </Pressable>
         )}
 
-        {/* TODAY — Firestore-backed */}
-        <Card>
-          <Text style={styles.cardTitle}>Today</Text>
+        {/* ====== Compact grid (everything lives here) ====== */}
+        <View style={styles.grid}>
+          {/* Today — seed packet */}
+          <View style={[styles.tile, { width: tilePx }]}>
+            <SeedPacket
+              title="Today"
+              subtitle="Tasks & Notes"
+              variant="rose"
+              footer={tasks?.length ? `${tasks.length} task${tasks.length>1?"s":""} today` : "All caught up?"}
+              onPress={() => router.push("/(tabs)/tasks")}
+            >
+              <View style={{ gap: 6 }}>
+                {/* Quick Add */}
+                <View style={{ flexDirection: "row", gap: 6 }}>
+                  <TextInput
+                    value={quickNote}
+                    onChangeText={setQuickNote}
+                    placeholder="Quick add…"
+                    placeholderTextColor="#9c8f86"
+                    style={styles.inputSm}
+                  />
+                  <Pressable onPress={quickAddToday} style={styles.btnPrimarySm}>
+                    <Text style={styles.btnPrimaryTxtSm}>Add</Text>
+                  </Pressable>
+                </View>
 
-          {/* Quick Add */}
-          <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
-            <TextInput
-              value={quickNote}
-              onChangeText={setQuickNote}
-              placeholder="Quick add (e.g., Water basil)"
-              placeholderTextColor="#9c8f86"
-              style={styles.input}
-            />
-            <Pressable onPress={quickAddToday} style={styles.btnPrimary}>
-              <Text style={styles.btnPrimaryTxt}>Add</Text>
-            </Pressable>
+                {/* Tiny list preview (max 2) */}
+                {tasks === null ? (
+                  <Text style={styles.cardSub}>Loading…</Text>
+                ) : tasks.length === 0 ? (
+                  <Text style={styles.cardSub}>You’re all caught up. 🌤️</Text>
+                ) : (
+                  <>
+                    {tasks.slice(0,2).map((t) => (
+                      <Pressable key={t.id} onPress={() => toggleTask(t.id, t.done)} style={styles.taskRowMini}>
+                        <View style={[styles.checkboxMini, t.done && styles.checkboxOn]} />
+                        <Text style={styles.taskMiniText} numberOfLines={1}>
+                          {(t.type?.toUpperCase?.() || "TASK") + (t.notes ? ` · ${t.notes}` : "")}
+                        </Text>
+                      </Pressable>
+                    ))}
+                    {tasks.length > 2 && (
+                      <Pressable onPress={() => router.push("/(tabs)/tasks")}>
+                        <Text style={styles.linkTiny}>View all ({tasks.length})</Text>
+                      </Pressable>
+                    )}
+                  </>
+                )}
+              </View>
+            </SeedPacket>
           </View>
 
-          {/* List */}
-          {tasks === null ? (
-            <Text style={[styles.cardSub, { marginTop: 8 }]}>Loading tasks…</Text>
-          ) : tasks.length === 0 ? (
-            <Text style={[styles.cardSub, { marginTop: 8 }]}>You’re all caught up. 🌤️</Text>
-          ) : (
-            <View style={{ marginTop: 8 }}>
-              {tasks.map((t) => (
-                <Pressable key={t.id} onPress={() => toggleTask(t.id, t.done)} style={styles.taskRow}>
-                  <View style={[styles.checkbox, t.done && styles.checkboxOn]} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.taskText}>{t.type?.toUpperCase?.() || "TASK"}</Text>
-                    {t.notes ? <Text style={styles.taskMeta}>{t.notes}</Text> : null}
-                  </View>
-                  <Text style={[styles.donePill, t.done ? styles.donePillOn : null]}>
-                    {t.done ? "Done" : "Tap to complete"}
-                  </Text>
+          {/* Weather + Frost — seed packet */}
+          <View style={[styles.tile, { width: tilePx }]}>
+            <SeedPacket
+              title="Weather & Frost"
+              subtitle="Today’s snapshot"
+              variant="green"
+              footer={`Low ${numOrDash(minToday, "°F")} • High ${numOrDash(maxToday, "°F")}`}
+            >
+              <View style={styles.wxRowCompact}>
+                <WxStat label="Low" value={numOrDash(minToday, "°F")} compact />
+                <VLine />
+                <WxStat label="High" value={numOrDash(maxToday, "°F")} compact />
+                <VLine />
+                <WxStat label="Precip" value={precipOrDash(precipToday)} compact />
+              </View>
+              <View style={styles.frostRowCompact}>
+                <FrostPill level={frostOutlook.level} />
+                <Text style={[styles.cardSub, styles.frostMsg]} numberOfLines={2}>
+                  {frostOutlook.msg}
+                </Text>
+              </View>
+            </SeedPacket>
+          </View>
+
+          {/* Your Garden — now shows user's beds */}
+          <View style={[styles.tile, { width: tilePx }]}>
+            <SeedPacket
+              title="Your Garden"
+              subtitle="Beds & Plants"
+              variant="gold"
+              footer={`${beds?.length ?? 0} bed${(beds?.length ?? 0) === 1 ? "" : "s"}`}
+            >
+              {/* Buttons row */}
+              <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                <Pressable
+                  style={[styles.btnSeed, styles.btnSeedPrimary]}
+                  android_ripple={{ color: "rgba(0,0,0,0.06)" }}
+                  onPress={() => router.push("/(tabs)/plants")}
+                >
+                  <Text style={[styles.btnSeedTxt, styles.btnSeedTxtPrimary]}>Open Beds</Text>
                 </Pressable>
-              ))}
-            </View>
-          )}
-        </Card>
 
-        {/* Weather Snapshot */}
-        <Card>
-          <Text style={styles.cardTitle}>Weather Snapshot</Text>
-          <View style={styles.wxRow}>
-            <WxStat label="Low" value={numOrDash(minToday, "°F")} />
-            <Divider />
-            <WxStat label="High" value={numOrDash(maxToday, "°F")} />
-            <Divider />
-            <WxStat label="Precip" value={precipOrDash(precipToday)} />
+                <Pressable
+                  style={[styles.btnSeed, styles.btnSeedHollow]}
+                  android_ripple={{ color: "rgba(0,0,0,0.05)" }}
+                  onPress={() => router.push("/(tabs)/plants?focus=new")}
+                >
+                  <Text style={[styles.btnSeedTxt, styles.btnSeedTxtHollow]}>Add Bed</Text>
+                </Pressable>
+              </View>
+
+              {/* Bed tags */}
+              {beds === null ? (
+                <Text style={styles.cardSub}>Loading beds…</Text>
+              ) : beds.length === 0 ? (
+                <Text style={styles.cardSub}>No beds yet. Add one to get started.</Text>
+              ) : (
+                <>
+                  <View style={styles.bedTagGrid}>
+                    {beds.slice(0, 6).map((b) => (
+                      <Pressable
+                        key={b.id}
+                        style={styles.bedTag}
+                        onPress={() => router.push("/(tabs)/plants")}
+                        android_ripple={{ color: "rgba(0,0,0,0.05)" }}
+                      >
+                        <Text style={styles.bedTagTxt} numberOfLines={1}>
+                          {b.name || b.title || "Unnamed bed"}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                  {beds.length > 6 && (
+                    <Pressable onPress={() => router.push("/(tabs)/plants")}>
+                      <Text style={styles.linkTiny}>View all beds ({beds.length})</Text>
+                    </Pressable>
+                  )}
+                </>
+              )}
+            </SeedPacket>
           </View>
-          <Text style={styles.cardHint}>Tip: Skip watering if rainfall ≥ 0.25" in the past 24h.</Text>
-        </Card>
 
-        {/* 🌱 Garden shortcuts — NEW */}
-        <Card>
-          <Text style={styles.cardTitle}>Your Garden</Text>
-          <Text style={styles.cardSub}>Manage beds and add plants from OpenFarm.</Text>
-
-          <View style={{ flexDirection: "row", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
-            <Pressable
-              style={styles.btnHollow}
-              onPress={() => router.push("/(tabs)/plants")}
+          {/* Watering Radar — seed packet (placeholder) */}
+          <View style={[styles.tile, { width: tilePx }]}>
+            <SeedPacket
+              title="Watering Radar"
+              subtitle="Schedules at a glance"
+              variant="green"
+              footer="Connect schedules to power this"
             >
-              <Text style={styles.btnHollowTxt}>Open Garden Beds</Text>
-            </Pressable>
+              <View>
+                <View style={styles.badgeGrid}>
+                  <StatusBadge tone="due">Bed A — Tomatoes</StatusBadge>
+                  <StatusBadge tone="soon">Herbs — Pots</StatusBadge>
+                  <StatusBadge tone="ok">North Bed — Peppers</StatusBadge>
+                </View>
+              </View>
+            </SeedPacket>
+          </View>
 
-            <Pressable
-              style={styles.btnHollow}
-              onPress={() => router.push("/(tabs)/plants?focus=new")}
+          {/* Plant of the Day — seed packet */}
+          <View style={[styles.tile, { width: tilePx }]}>
+            <SeedPacket
+              title="Plant of the Day"
+              subtitle={plantOfDay?.name ?? "—"}
+              variant="rose"
+              footer="Tip of the day"
             >
-              <Text style={styles.btnHollowTxt}>Add a Bed</Text>
-            </Pressable>
+              <View style={styles.podRow}>
+                <Text style={styles.podIcon}>{plantOfDay?.icon ?? "🌿"}</Text>
+                <Text style={styles.cardSub} numberOfLines={3}>
+                  {plantOfDay?.tip ?? "Daily growing tip appears here."}
+                </Text>
+              </View>
+            </SeedPacket>
           </View>
+        </View>
 
-          <Text style={[styles.cardHint, { marginTop: 10 }]}>
-            To add plants from OpenFarm: open a bed → “Add plant from OpenFarm”.
-          </Text>
-        </Card>
-
-        {/* Watering Radar (placeholder; wire later) */}
-        <Card>
-          <Text style={styles.cardTitle}>Watering Radar</Text>
-          <Text style={styles.cardSub}>Connect plant schedules to see live status here.</Text>
-          <View style={styles.badgeGrid}>
-            <StatusBadge tone="due">Bed A — Tomatoes</StatusBadge>
-            <StatusBadge tone="soon">Herbs — Pots</StatusBadge>
-            <StatusBadge tone="ok">North Bed — Peppers</StatusBadge>
-            <StatusBadge tone="ok">Trellis — Cucumbers</StatusBadge>
-          </View>
-        </Card>
-
-        {/* Frost Watch */}
-        <Card>
-          <Text style={styles.cardTitle}>Frost Watch (next 3 nights)</Text>
-          <View style={styles.frostRow}>
-            <FrostPill level={frostOutlook.level} />
-            <Text style={[styles.cardSub, { flex: 1, marginLeft: 10 }]}>{frostOutlook.msg}</Text>
-          </View>
-        </Card>
-
-        {/* Plant of the Day */}
-        <Card>
-          <Text style={styles.cardTitle}>Plant of the Day</Text>
-          <View style={styles.podRow}>
-            <Text style={styles.podIcon}>{plantOfDay.icon}</Text>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.podName}>{plantOfDay.name}</Text>
-              <Text style={styles.cardSub}>{plantOfDay.tip}</Text>
-            </View>
-          </View>
-        </Card>
-
-        <View style={{ height: 24 }} />
+        <View style={{ height: 18 }} />
       </ScrollView>
     </ImageBackground>
   );
 }
 
 /* Small components */
-const WxStat = ({ label, value }) => (
+const WxStat = ({ label, value, compact = false }) => (
   <View style={{ alignItems: "center", flex: 1 }}>
-    <Text style={styles.wxLabel}>{label}</Text>
-    <Text style={styles.wxValue}>{value}</Text>
+    <Text style={[styles.wxLabel, compact && styles.wxLabelCompact]}>{label}</Text>
+    <Text style={[styles.wxValue, compact && styles.wxValueCompact]}>{value}</Text>
   </View>
 );
-const Divider = () => <View style={{ width: 1, backgroundColor: C.border, marginHorizontal: 8 }} />;
+const VLine = () => <View style={{ width: 1, backgroundColor: C.border, marginHorizontal: 6, alignSelf: "stretch" }} />;
 
 const StatusBadge = ({ tone = "ok", children }) => {
   const map = {
@@ -392,21 +538,16 @@ const FrostPill = ({ level }) => {
 /* Styles */
 const styles = StyleSheet.create({
   loadingWrap: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: C.bg },
-  container: { padding: 16, gap: 16, backgroundColor: "transparent" },
+  container: { padding: 12, gap: 12, backgroundColor: "transparent" },
 
-  // HERO
-  heroWrap: {
+  // Dynamic top strip (replaces big hero)
+  topStrip: {
     backgroundColor: C.bgAlt,
     borderWidth: 1, borderColor: C.border,
-    borderRadius: 18, padding: 16,
-    flexDirection: "row", alignItems: "center", gap: 14,
+    borderRadius: 14, paddingVertical: 10, paddingHorizontal: 12,
   },
-  heroEmojiCol: { alignItems: "center", gap: 6, marginRight: 8 },
-  heroEmoji: { fontSize: 44 },
-  heroEmojiSmall: { fontSize: 24, opacity: 0.9 },
-  heroTitle: { fontSize: 26, fontWeight: "800", color: C.text },
-  heroSub: { color: C.sub, marginTop: 2 },
-  heroWx: { marginTop: 8, color: C.text },
+  topStripGreeting: { fontSize: 16, fontWeight: "800", color: C.text },
+  topStripTag: { color: C.sub, marginTop: 2, fontSize: 12 },
 
   // OVERDUE STRIP
   overdueStrip: {
@@ -414,80 +555,127 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: C.terracotta,
     borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
   },
-  overdueText: { color: C.text, fontWeight: "700" },
+  overdueText: { color: C.text, fontWeight: "700", fontSize: 13 },
 
-  // CARDS
-  cardTitle: { fontSize: 18, fontWeight: "800", color: C.text, marginBottom: 6 },
-  cardSub: { color: C.sub },
+  // CARDS / TEXT
+  cardTitle: { fontSize: 15, fontWeight: "800", color: C.text, marginBottom: 4 },
+  cardSub: { color: C.sub, fontSize: 12 },
+  cardHint: { color: C.sub, fontSize: 11, marginTop: 6 },
 
-  input: {
+  inputSm: {
     flex: 1,
     backgroundColor: C.white,
     borderWidth: 1, borderColor: C.border,
     borderRadius: 10,
-    paddingHorizontal: 10, paddingVertical: 8,
+    paddingHorizontal: 8, paddingVertical: 6,
     color: C.text,
+    fontSize: 13,
   },
-  btnPrimary: {
+  btnPrimarySm: {
     backgroundColor: "#A26769",
-    paddingHorizontal: 14, paddingVertical: 10,
+    paddingHorizontal: 10, paddingVertical: 8,
     borderRadius: 10, alignItems: "center", justifyContent: "center",
   },
-  btnPrimaryTxt: { color: "white", fontWeight: "700" },
+  btnPrimaryTxtSm: { color: "white", fontWeight: "700", fontSize: 12 },
 
-  btnHollow: {
-    borderWidth: 1,
-    borderColor: C.border,
-    backgroundColor: C.white,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 10,
-  },
-  btnHollowTxt: { color: C.text, fontWeight: "700" },
-
-  wxRow: {
-    flexDirection: "row", alignItems: "center",
+  // WEATHER (compact)
+  wxRowCompact: {
+    flexDirection: "row",
+    alignItems: "center",
     backgroundColor: C.white,
     borderRadius: 12, borderWidth: 1, borderColor: C.border,
-    padding: 12, marginTop: 6,
+    paddingVertical: 6, paddingHorizontal: 8, marginTop: 4,
   },
-  wxLabel: { color: C.sub, fontSize: 12 },
-  wxValue: { color: C.text, fontSize: 18, fontWeight: "700", marginTop: 2 },
-  cardHint: { color: C.sub, fontSize: 12, marginTop: 8 },
+  wxLabel: { color: C.sub, fontSize: 11 },
+  wxValue: { color: C.text, fontSize: 16, fontWeight: "700", marginTop: 2 },
+  wxLabelCompact: { fontSize: 10 },
+  wxValueCompact: { fontSize: 15 },
 
-  badgeGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 },
-  badge: { borderRadius: 10, paddingVertical: 8, paddingHorizontal: 10, borderWidth: 1, borderColor: C.border },
-  badgeText: { fontSize: 13, fontWeight: "600" },
+  // BADGES
+  badgeGrid: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 6 },
+  badge: { borderRadius: 10, paddingVertical: 6, paddingHorizontal: 8, borderWidth: 1, borderColor: C.border },
+  badgeText: { fontSize: 12, fontWeight: "600" },
 
-  frostRow: { flexDirection: "row", alignItems: "center", marginTop: 6 },
-  frostPill: { borderRadius: 999, paddingVertical: 6, paddingHorizontal: 12, borderWidth: 1, borderColor: C.border },
-  frostPillText: { fontWeight: "700" },
+  // FROST (compact)
+  frostRowCompact: { flexDirection: "row", alignItems: "center", marginTop: 6, gap: 8 },
+  frostPill: { borderRadius: 999, paddingVertical: 5, paddingHorizontal: 10, borderWidth: 1, borderColor: C.border },
+  frostPillText: { fontWeight: "700", fontSize: 12 },
+  frostMsg: { flex: 1, fontSize: 12 },
 
-  // TODAY list
-  taskRow: {
+  // MINI task list
+  taskRowMini: {
     flexDirection: "row", alignItems: "center",
-    gap: 10, paddingVertical: 10,
+    gap: 8, paddingVertical: 6,
     borderBottomWidth: 1, borderBottomColor: C.border,
   },
-  checkbox: {
-    width: 18, height: 18, borderRadius: 4,
+  checkboxMini: {
+    width: 14, height: 14, borderRadius: 3,
     borderWidth: 2, borderColor: C.sub, backgroundColor: "transparent",
   },
   checkboxOn: { backgroundColor: "#7BA47E", borderColor: "#7BA47E" },
-  taskText: { color: C.text, fontSize: 15, fontWeight: "700" },
-  taskMeta: { color: C.sub, fontSize: 13, marginTop: 2 },
-  donePill: {
-    borderWidth: 1, borderColor: C.border,
-    paddingHorizontal: 8, paddingVertical: 4,
-    borderRadius: 999, fontSize: 12, color: C.sub,
-  },
-  donePillOn: { backgroundColor: "#E9F3EB", color: "#2E5E3A", borderColor: "#CFE3D3" },
+  taskMiniText: { color: C.text, fontSize: 13, flex: 1 },
+  linkTiny: { color: "#A26769", fontWeight: "700", marginTop: 6, fontSize: 12 },
 
   // POD
-  podRow: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 6 },
-  podIcon: { fontSize: 36 },
-  podName: { fontSize: 16, fontWeight: "700", color: C.text, marginBottom: 2 },
+  podRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 4 },
+  podIcon: { fontSize: 30 },
+  podName: { fontSize: 14, fontWeight: "700", color: C.text, marginBottom: 2 },
+
+  // GRID LAYOUT — evenly spaced columns
+  grid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    rowGap: 10,
+    marginTop: 6,
+  },
+  tile: {
+    aspectRatio: 0.65, // tall & narrow like seed packets
+    minHeight: 130,
+  },
+  tileContent: {
+    minHeight: 90,
+    justifyContent: "space-between",
+  },
+
+  // Seed-tag buttons
+  btnSeed: {
+    borderRadius: 999,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderWidth: 2,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
+  },
+  btnSeedPrimary: { backgroundColor: C.terracotta, borderColor: "#8F6F52" },
+  btnSeedHollow: { backgroundColor: "#FFF8ED", borderColor: "#D2BDA6" },
+  btnSeedTxt: { fontWeight: "800", fontSize: 13, letterSpacing: 0.3 },
+  btnSeedTxtPrimary: { color: C.white },
+  btnSeedTxtHollow: { color: C.text },
+
+  // Bed tags
+  bedTagGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  bedTag: {
+    backgroundColor: C.white,
+    borderColor: C.border,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    shadowColor: "#000",
+    shadowOpacity: 0.06,
+    shadowRadius: 1.5,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
+    maxWidth: "100%",
+  },
+  bedTagTxt: { color: C.text, fontWeight: "700", fontSize: 12, maxWidth: 180 },
 });

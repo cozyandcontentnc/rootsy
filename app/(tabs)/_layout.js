@@ -2,13 +2,12 @@
 import { Tabs } from "expo-router";
 import Ionicons from "@expo/vector-icons/Ionicons";
 
-
 export default function TabsLayout() {
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarShowLabel: true,           // show names under icons
+        tabBarShowLabel: true,
         tabBarActiveTintColor: "#A26769",
         tabBarInactiveTintColor: "#856d6f",
         tabBarStyle: { height: 58, paddingTop: 6, paddingBottom: 6 },
@@ -23,16 +22,23 @@ export default function TabsLayout() {
           ),
         }}
       />
+
       <Tabs.Screen
-        name="plants/index"     // must match folder/file
+        name="plants/index"
         options={{
           tabBarLabel: "Plants",
           tabBarIcon: ({ color, size, focused }) => (
-            <Ionicons name={focused ? "leaf" : "leaf"} size={size ?? 24} color={color} />
+            <Ionicons name={focused ? "leaf" : "leaf-outline"} size={size ?? 24} color={color} />
           ),
         }}
       />
-      {/* Hide details route from the tab bar */}
+
+      {/* Hide Plants nested routes from the tab bar */}
+      <Tabs.Screen name="plants/bed/[bedId]" options={{ href: null }} />
+      <Tabs.Screen name="plants/detail/[cropSlug]" options={{ href: null }} />
+      <Tabs.Screen name="plants/search/[bedId]" options={{ href: null }} />
+
+      {/* If you don't actually use plants/[slug], remove or keep hidden */}
       <Tabs.Screen name="plants/[slug]" options={{ href: null }} />
 
       <Tabs.Screen
