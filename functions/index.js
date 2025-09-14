@@ -2,32 +2,72 @@
 const { onRequest } = require("firebase-functions/v2/https");
 const { defineSecret } = require("firebase-functions/params");
 
-// Secrets
+// ---- Secret ----
 const TREFLE_TOKEN = defineSecret("TREFLE_TOKEN");
 
-// CORS helper
-function corsHeaders() {
+// ---- Allowed Origins ----
+// NOTE: Wildcards don't work in Sets directly, so we implement a small matcher below.
+const ALLOWED_EXACT = new Set([
+  "https://bookishbroads.vercel.app",
+  "http://localhost:19006", // Expo Web (dev)
+  "http://localhost",        // in case you hit it directly
+]);
+const ALLOWED_SUFFIXES = [
+  ".expo.dev",               // any https://*.expo.dev
+];
+
+// Helpers
+function isAllowedOrigin(origin) {
+  if (!origin) return false;
+  if (ALLOWED_EXACT.has(origin)) return true;
+  try {
+    const u = new URL(origin);
+    // only allow https for suffix matches
+    if (u.protocol !== "https:") return false;
+    // match *.expo.dev
+    return ALLOWED_SUFFIXES.some(sfx => u.hostname.endsWith(sfx));
+  } catch {
+    return false;
+  }
+}
+
+function resolveAllowedOrigin(req) {
+  const origin = req.get("origin") || "";
+  if (!origin) return "*";           // Non-browser callers (e.g., server-to-server)
+  return isAllowedOrigin(origin) ? origin : "null";
+}
+
+// CORS headers (computed per-request)
+function corsHeaders(origin) {
   return {
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": origin,
+    "Vary": "Origin",
     "Access-Control-Allow-Methods": "GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400",
   };
 }
 
-function sendJson(res, status, obj, extraHeaders = {}) {
+function sendJson(req, res, status, obj, extraHeaders = {}) {
+  const origin = resolveAllowedOrigin(req);
   res
     .set({
       "content-type": "application/json",
       "cache-control":
         "public, max-age=0, s-maxage=43200, stale-while-revalidate=86400",
-      ...corsHeaders(),
+      ...corsHeaders(origin),
       ...extraHeaders,
     })
     .status(status)
     .send(JSON.stringify(obj));
 }
 
+function sendNoContent(req, res) {
+  const origin = resolveAllowedOrigin(req);
+  res.set(corsHeaders(origin)).status(204).send("");
+}
+
+// Map Trefle plant -> OpenFarm-ish minimal shape
 function mapPlant(p) {
   return {
     id: p.id,
@@ -39,22 +79,21 @@ function mapPlant(p) {
   };
 }
 
+// =======================
 // GET /cropsSearch?filter=tomato&page=1
+// =======================
 exports.cropsSearch = onRequest(
   { region: "us-east1", cors: false, secrets: [TREFLE_TOKEN] },
   async (req, res) => {
-    if (req.method === "OPTIONS") {
-      res.set(corsHeaders()).status(204).send("");
-      return;
-    }
+    if (req.method === "OPTIONS") return sendNoContent(req, res);
 
     try {
       const token = TREFLE_TOKEN.value();
-      if (!token) return sendJson(res, 500, { error: "Missing TREFLE_TOKEN" });
+      if (!token) return sendJson(req, res, 500, { error: "Missing TREFLE_TOKEN" });
 
       const q = String(req.query.filter || "").trim();
       const page = Number(req.query.page || 1);
-      if (!q) return sendJson(res, 400, { error: "Missing ?filter" });
+      if (!q) return sendJson(req, res, 400, { error: "Missing ?filter" });
 
       const url = new URL("https://trefle.io/api/v1/plants/search");
       url.searchParams.set("token", token);
@@ -67,7 +106,7 @@ exports.cropsSearch = onRequest(
 
       if (!upstream.ok) {
         const text = await upstream.text().catch(() => "");
-        return sendJson(res, upstream.status, {
+        return sendJson(req, res, upstream.status, {
           error: `Trefle search failed: ${upstream.status}`,
           body: text,
         });
@@ -79,33 +118,31 @@ exports.cropsSearch = onRequest(
         meta: { total: data?.meta?.total || 0, page },
       };
 
-      sendJson(res, 200, payload);
+      return sendJson(req, res, 200, payload);
     } catch (e) {
-      sendJson(res, 500, { error: String(e?.message || e) });
+      return sendJson(req, res, 500, { error: String(e?.message || e) });
     }
   }
 );
 
-// GET /cropShow/:id  -> returns mapped plant + optional species growth fields
+// =======================
+// GET /cropShow/:id
+// returns mapped plant + optional species growth fields
+// =======================
 exports.cropShow = onRequest(
   { region: "us-east1", cors: false, secrets: [TREFLE_TOKEN] },
   async (req, res) => {
-    if (req.method === "OPTIONS") {
-      res.set(corsHeaders()).status(204).send("");
-      return;
-    }
+    if (req.method === "OPTIONS") return sendNoContent(req, res);
 
     try {
       const token = TREFLE_TOKEN.value();
-      if (!token) return sendJson(res, 500, { error: "Missing TREFLE_TOKEN" });
+      if (!token) return sendJson(req, res, 500, { error: "Missing TREFLE_TOKEN" });
 
-      const segments = String(req.path || "")
-        .split("/")
-        .filter(Boolean);
+      const segments = String(req.path || "").split("/").filter(Boolean);
       const id = segments[segments.length - 1];
-      if (!id) return sendJson(res, 400, { error: "Missing plant id" });
+      if (!id) return sendJson(req, res, 400, { error: "Missing plant id" });
 
-      // Fetch plant
+      // Plant
       const plantUrl = new URL(`https://trefle.io/api/v1/plants/${id}`);
       plantUrl.searchParams.set("token", token);
 
@@ -115,7 +152,7 @@ exports.cropShow = onRequest(
 
       if (!plantResp.ok) {
         const text = await plantResp.text().catch(() => "");
-        return sendJson(res, plantResp.status, {
+        return sendJson(req, res, plantResp.status, {
           error: `Trefle plant failed: ${plantResp.status}`,
           body: text,
         });
@@ -124,7 +161,7 @@ exports.cropShow = onRequest(
       const plantJson = await plantResp.json();
       const base = mapPlant(plantJson?.data || {});
 
-      // Optional enrichment from species endpoint (best-effort)
+      // Optional enrichment: species
       let growth = {};
       try {
         const speciesUrl = new URL(`https://trefle.io/api/v1/species/${id}`);
@@ -143,12 +180,12 @@ exports.cropShow = onRequest(
           };
         }
       } catch {
-        // ignore enrichment failures silently
+        // Ignore enrichment failures silently
       }
 
-      sendJson(res, 200, { data: { ...base, ...growth } });
+      return sendJson(req, res, 200, { data: { ...base, ...growth } });
     } catch (e) {
-      sendJson(res, 500, { error: String(e?.message || e) });
+      return sendJson(req, res, 500, { error: String(e?.message || e) });
     }
   }
 );
