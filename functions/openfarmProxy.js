@@ -1,11 +1,13 @@
 // functions/openfarmProxy.js
+// Firestore-backed replacement (no Trefle, no secrets)
+
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
 
-// Initialize once
 try { admin.app(); } catch { admin.initializeApp(); }
+const db = admin.firestore();
 
-// CORS helper (simple & permissive; tighten if you want)
+// --- CORS (same as before; tighten if you want) ---
 function withCors(handler) {
   return async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -16,90 +18,81 @@ function withCors(handler) {
   };
 }
 
-// Read token from secret at runtime
-const TREFLE_TOKEN = process.env.TREFLE_TOKEN;
-
-// Map Trefle plant object to a small OpenFarm-like shape
-function mapPlant(p) {
+// Map your Firestore plant doc to a small OpenFarm-like preview
+function mapPreview(d) {
+  const x = d.data() || {};
   return {
-    id: p.id,
-    slug: String(p.id),                     // use ID as slug surrogate
-    name: p.common_name || p.scientific_name,
-    binomial_name: p.scientific_name,
-    description: p.family_common_name || "",
-    main_image_path: p.image_url || null,
+    id: x.slug || d.id,
+    slug: x.slug || d.id,
+    name: x.name || x.variety ? `${x.name || ""}${x.variety ? " — " + x.variety : ""}` : (x.name || "Unknown"),
+    binomial_name: x.scientificName || null,
+    description: x.description || "",
+    main_image_path: x.imageUrl || null,
   };
 }
 
-// GET /cropsSearch?filter=tomato&page=1  (OpenFarm-like)
-export const cropsSearch = functions.https.onRequest(
-  withCors(async (req, res) => {
-    try {
-      const q = String(req.query.filter || "").trim();
-      const page = Number(req.query.page || 1);
-      if (!TREFLE_TOKEN) return res.status(500).json({ error: "Missing TREFLE_TOKEN" });
-      if (!q) return res.status(400).json({ error: "Missing ?filter" });
+// GET /cropsSearch?filter=term&page=1   (kept name for compatibility)
+// - Prefix search on name_lower
+// - If not enough, OR if multi-token, also tries keywords array
+export const cropsSearch = functions.https.onRequest(withCors(async (req, res) => {
+  try {
+    const q = String(req.query.filter || "").trim().toLowerCase();
+    if (!q) return res.status(400).json({ error: "Missing ?filter" });
 
-      const url = new URL("https://trefle.io/api/v1/plants/search");
-      url.searchParams.set("token", TREFLE_TOKEN);
-      url.searchParams.set("q", q);
-      url.searchParams.set("page", String(page));
+    const tokens = q.split(/[^a-z0-9]+/g).filter(Boolean).slice(0, 10);
+    const out = [];
+    const seen = new Set();
 
-      const r = await fetch(url);
-      if (!r.ok) throw new Error(`Trefle search failed: ${r.status}`);
-      const data = await r.json();
+    // 1) prefix search on name_lower
+    const start = q;
+    const end = q + "\uf8ff";
+    const snap1 = await db.collection("plants")
+      .orderBy("name_lower")
+      .startAt(start)
+      .endAt(end)
+      .limit(25)
+      .get();
 
-      res.json({
-        data: (data.data || []).map(mapPlant),
-        meta: { total: data.meta?.total || 0, page },
+    snap1.forEach(d => {
+      const m = mapPreview(d);
+      if (!seen.has(m.slug)) { seen.add(m.slug); out.push(m); }
+    });
+
+    // 2) keywords search (broad), if needed
+    if (out.length < 25 && tokens.length) {
+      const snap2 = await db.collection("plants")
+        .where("keywords", "array-contains-any", tokens)
+        .limit(25)
+        .get();
+
+      snap2.forEach(d => {
+        const m = mapPreview(d);
+        if (!seen.has(m.slug)) { seen.add(m.slug); out.push(m); }
       });
-    } catch (e) {
-      res.status(500).json({ error: String(e.message || e) });
     }
-  })
-);
 
-// GET /cropShow/:id  -> returns a single plant, enriched with species growth if available
-export const cropShow = functions.https.onRequest(
-  withCors(async (req, res) => {
-    try {
-      if (!TREFLE_TOKEN) return res.status(500).json({ error: "Missing TREFLE_TOKEN" });
-      const pathParts = req.path.split("/").filter(Boolean);
-      const id = pathParts[pathParts.length - 1];
-      if (!id) return res.status(400).json({ error: "Missing plant id" });
+    return res.json({
+      data: out,
+      meta: { total: out.length, upstream: "firestore" },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+}));
 
-      const plantUrl = new URL(`https://trefle.io/api/v1/plants/${id}`);
-      plantUrl.searchParams.set("token", TREFLE_TOKEN);
+// GET /cropShow/:slug  (kept name for compatibility)
+// Returns the full plant doc (mapped)
+export const cropShow = functions.https.onRequest(withCors(async (req, res) => {
+  try {
+    const parts = req.path.split("/").filter(Boolean);
+    const slug = parts[parts.length - 1];
+    if (!slug) return res.status(400).json({ error: "Missing plant slug" });
 
-      const plantResp = await fetch(plantUrl);
-      if (!plantResp.ok) throw new Error(`Trefle plant failed: ${plantResp.status}`);
-      const plantJson = await plantResp.json();
-      const base = mapPlant(plantJson.data);
+    const snap = await db.collection("plants").doc(slug).get();
+    if (!snap.exists) return res.status(404).json({ error: "Not found" });
 
-      // OPTIONAL: Hit species endpoint for growth data (watering, shade, duration, etc.)
-      let growth = {};
-      try {
-        // For many entries, species ID equals plant ID; if not, this still often works.
-        const speciesUrl = new URL(`https://trefle.io/api/v1/species/${id}`);
-        speciesUrl.searchParams.set("token", TREFLE_TOKEN);
-        const speciesResp = await fetch(speciesUrl);
-        if (speciesResp.ok) {
-          const speciesJson = await speciesResp.json();
-          const s = speciesJson.data || {};
-          growth = {
-            growth_habit: s.growth_habit ?? null,
-            duration: s.duration ?? null,
-            edible_part: s.edible_part ?? null,
-            growth: s.growth ?? null, // contains min/max temp, shade, etc. (if present)
-          };
-        }
-      } catch {
-        // silently ignore enrichment failure
-      }
-
-      res.json({ data: { ...base, ...growth } });
-    } catch (e) {
-      res.status(500).json({ error: String(e.message || e) });
-    }
-  })
-);
+    return res.json({ data: mapPreview(snap) });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+}));

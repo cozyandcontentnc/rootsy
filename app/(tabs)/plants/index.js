@@ -1,5 +1,5 @@
 // app/(tabs)/plants/index.js
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Pressable,
   Alert,
+  StyleSheet,
 } from "react-native";
 import {
   addDoc,
@@ -21,10 +22,14 @@ import { onAuthStateChanged } from "firebase/auth";
 import { auth, db } from "../../../src/firebase";
 import { Link, useRouter } from "expo-router";
 import Card from "../../../components/Card";
-import { useAuth } from "../../../contexts/AuthContext";
+
+// CSV loader (local-only plant library)
+import usePlantsCsv from "../../../src/usePlantsCsv";
 
 export default function Plants() {
   const router = useRouter();
+
+  // ----- Auth + Beds (unchanged core logic) -----
   const [authChecked, setAuthChecked] = useState(false);
   const [user, setUser] = useState(null);
 
@@ -34,7 +39,6 @@ export default function Plants() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
-  // 1) Wait for auth state first
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u ?? null);
@@ -43,9 +47,8 @@ export default function Plants() {
     return unsub;
   }, []);
 
-  // 2) Once we know auth state, subscribe to this user's beds
   useEffect(() => {
-    if (!authChecked) return; // not ready
+    if (!authChecked) return;
     if (!user) {
       setBeds([]);
       setLoading(false);
@@ -76,7 +79,7 @@ export default function Plants() {
     return () => unsub();
   }, [authChecked, user]);
 
-  const filtered = useMemo(() => {
+  const filteredBeds = useMemo(() => {
     const s = qtext.trim().toLowerCase();
     if (!s) return beds;
     return beds.filter((b) => (b.name || "").toLowerCase().includes(s));
@@ -98,40 +101,45 @@ export default function Plants() {
     }
   };
 
+  // ----- CSV Plants (local-only library + search) -----
+  const { plants, loading: plantsLoading, error: plantsError, search } = usePlantsCsv();
+  const [plantQuery, setPlantQuery] = useState("");
+  const plantResults = useMemo(() => search(plantQuery), [plantQuery, search]);
+
   // Loading auth or beds
   if (!authChecked || loading) {
     return (
-      <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+      <View style={S.center}>
         <ActivityIndicator />
-        <Text style={{ marginTop: 8, color: "#6b5a50" }}>
+        <Text style={S.sub}>
           {authChecked ? "Loading garden beds…" : "Checking your sign-in…"}
         </Text>
       </View>
     );
   }
 
-  // Signed-out view (no error)
+  // Signed-out view (now also shows the local CSV plant browser)
   if (!user) {
     return (
-      <View style={{ flex: 1, padding: 16, gap: 12, justifyContent: "center" }}>
-        <Text style={{ fontSize: 22, fontWeight: "800", color: "#4a3f35" }}>
-          Garden Beds
-        </Text>
-        <Text style={{ color: "#6b5a50", marginBottom: 8 }}>
-          Sign in to create beds and add plants from OpenFarm.
-        </Text>
-        <Pressable
-          onPress={() => router.push("/login")}
-          style={{
-            alignSelf: "flex-start",
-            paddingHorizontal: 16,
-            paddingVertical: 10,
-            borderRadius: 10,
-            backgroundColor: "#A26769",
-          }}
-        >
-          <Text style={{ color: "white", fontWeight: "700" }}>Go to Login</Text>
-        </Pressable>
+      <View style={{ flex: 1 }}>
+        <View style={{ padding: 16, gap: 8 }}>
+          <Text style={S.h1}>Garden Beds</Text>
+          <Text style={S.sub}>Sign in to create beds and add plants.</Text>
+          <Pressable onPress={() => router.push("/login")} style={S.btn}>
+            <Text style={S.btnText}>Go to Login</Text>
+          </Pressable>
+        </View>
+
+        <View style={S.divider} />
+
+        <PlantsBrowser
+          plantQuery={plantQuery}
+          setPlantQuery={setPlantQuery}
+          plantsLoading={plantsLoading}
+          plantsError={plantsError}
+          plantResults={plantResults}
+          onOpenDetail={(slug) => router.push(`/plants/detail/${slug}`)}
+        />
       </View>
     );
   }
@@ -149,87 +157,135 @@ export default function Plants() {
     );
   }
 
-  // Signed-in normal UI
+  // Signed-in normal UI: Beds manager + CSV plant browser
+  return (
+    <FlatList
+      ListHeaderComponent={
+        <View style={{ padding: 16, gap: 12 }}>
+          <Text style={S.h1}>Garden Beds</Text>
+
+          {/* Create new bed */}
+          <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+            <TextInput
+              placeholder="New bed name (e.g., Front Left)"
+              value={newBed}
+              onChangeText={setNewBed}
+              style={S.input}
+            />
+            <Pressable onPress={addBed} style={S.btn}>
+              <Text style={S.btnText}>Add</Text>
+            </Pressable>
+          </View>
+
+          {/* Search beds */}
+          <TextInput
+            placeholder="Search beds…"
+            value={qtext}
+            onChangeText={setQtext}
+            style={S.input}
+          />
+        </View>
+      }
+      data={filteredBeds}
+      keyExtractor={(item) => item.id}
+      renderItem={({ item }) => (
+        <Card style={{ marginHorizontal: 16, marginBottom: 8 }}>
+          <Link
+            href={{
+              pathname: "/plants/bed/[bedId]",
+              params: { bedId: item.id, name: item.name ?? "" },
+            }}
+          >
+            <View>
+              <Text style={{ fontWeight: "700", color: "#4a3f35" }}>{item.name}</Text>
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+                <Pill>Tap to view plants</Pill>
+                <Pill>+ Add plants</Pill>
+              </View>
+            </View>
+          </Link>
+        </Card>
+      )}
+      ListEmptyComponent={
+        <Text style={{ color: "#6b5a50", paddingHorizontal: 16 }}>
+          No beds yet. Add your first one above.
+        </Text>
+      }
+      ListFooterComponent={
+        <View style={{ marginTop: 16 }}>
+          <View style={S.divider} />
+          <PlantsBrowser
+            plantQuery={plantQuery}
+            setPlantQuery={setPlantQuery}
+            plantsLoading={plantsLoading}
+            plantsError={plantsError}
+            plantResults={plantResults}
+            onOpenDetail={(slug) => router.push(`/plants/detail/${slug}`)}
+          />
+        </View>
+      }
+    />
+  );
+}
+
+function PlantsBrowser({
+  plantQuery,
+  setPlantQuery,
+  plantsLoading,
+  plantsError,
+  plantResults,
+  onOpenDetail,
+}) {
   return (
     <View style={{ padding: 16, gap: 12 }}>
-      <Text style={{ fontSize: 22, fontWeight: "800" }}>Garden Beds</Text>
-
-      {/* Create new bed */}
-      <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
-        <TextInput
-          placeholder="New bed name (e.g., Front Left)"
-          value={newBed}
-          onChangeText={setNewBed}
-          style={{
-            flex: 1,
-            borderWidth: 1,
-            borderRadius: 10,
-            padding: 10,
-            backgroundColor: "white",
-            borderColor: "#e5dcc9",
-          }}
-        />
-        <Pressable
-          onPress={addBed}
-          style={{
-            paddingHorizontal: 14,
-            paddingVertical: 10,
-            borderRadius: 10,
-            backgroundColor: "#A26769",
-          }}
-        >
-          <Text style={{ color: "white", fontWeight: "700" }}>Add</Text>
-        </Pressable>
-      </View>
-
-      {/* Search beds */}
+      <Text style={S.h1}>Browse Plants</Text>
       <TextInput
-        placeholder="Search beds…"
-        value={qtext}
-        onChangeText={setQtext}
-        style={{
-          borderWidth: 1,
-          borderRadius: 10,
-          padding: 10,
-          backgroundColor: "white",
-          borderColor: "#e5dcc9",
-        }}
+        placeholder="Search by name, variety, alias…"
+        value={plantQuery}
+        onChangeText={setPlantQuery}
+        style={S.input}
+        autoCapitalize="none"
+        autoCorrect={false}
       />
 
-      <FlatList
-        data={filtered}
-        keyExtractor={(item) => item.id}
-        ListEmptyComponent={
-          <Text style={{ color: "#6b5a50" }}>
-            No beds yet. Add your first one above.
+      {plantsLoading ? (
+        <View style={S.center}>
+          <ActivityIndicator />
+          <Text style={S.sub}>Loading your plant library…</Text>
+        </View>
+      ) : plantsError ? (
+        <View>
+          <Text style={{ color: "#B3261E", marginBottom: 4 }}>
+            Couldn’t load plants.csv
           </Text>
-        }
-        renderItem={({ item }) => (
-          <Card style={{ marginBottom: 8 }}>
-            <Link
-              href={{
-                pathname: "/plants/bed/[bedId]",
-                params: { bedId: item.id, name: item.name ?? "" },
-              }}
-            >
-              <View>
-                <Text style={{ fontWeight: "700" }}>{item.name}</Text>
-                <View
-                  style={{
-                    flexDirection: "row",
-                    gap: 8,
-                    marginTop: 4,
-                    flexWrap: "wrap",
-                  }}
-                >
-                  <Pill>Tap to view plants</Pill>
-                  <Pill>+ Add from OpenFarm</Pill>
-                </View>
+          <Text style={S.sub}>{String(plantsError.message || plantsError)}</Text>
+        </View>
+      ) : (
+        <FlatList
+          data={plantResults}
+          keyExtractor={(item) => item.slug || item.name}
+          ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
+          renderItem={({ item }) => (
+            <Pressable onPress={() => onOpenDetail(item.slug)} style={S.card}>
+              <View style={{ flex: 1 }}>
+                <Text style={S.cardTitle}>
+                  {item.name}
+                  {item.variety ? ` — ${item.variety}` : ""}
+                </Text>
+                {!!item.scientificName && (
+                  <Text style={S.sci}>{item.scientificName}</Text>
+                )}
+                {!!item.tags?.length && (
+                  <Text style={S.tags}>{item.tags.join(" · ")}</Text>
+                )}
               </View>
-            </Link>
-          </Card>
-        )}
-      />
+            </Pressable>
+          )}
+          ListEmptyComponent={
+            <Text style={S.sub}>No matches found.</Text>
+          }
+        />
+      )}
     </View>
   );
 }
@@ -250,3 +306,43 @@ function Pill({ children }) {
     </View>
   );
 }
+
+const S = StyleSheet.create({
+  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
+  h1: { fontSize: 22, fontWeight: "800", color: "#4a3f35" },
+  sub: { color: "#6b5a50", marginTop: 8, textAlign: "center" },
+  btn: {
+    alignSelf: "flex-start",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: "#A26769",
+  },
+  btnText: { color: "white", fontWeight: "700" },
+  input: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 10,
+    backgroundColor: "white",
+    borderColor: "#e5dcc9",
+    color: "#4a3f35",
+  },
+  divider: {
+    height: 1,
+    backgroundColor: "#efe7d6",
+    marginHorizontal: 16,
+    marginVertical: 8,
+  },
+  card: {
+    backgroundColor: "#fffaf3",
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#e5dcc9",
+    marginHorizontal: 16,
+  },
+  cardTitle: { fontSize: 16, fontWeight: "700", color: "#4a3f35" },
+  sci: { fontSize: 13, color: "#6b5a50", marginTop: 2, fontStyle: "italic" },
+  tags: { fontSize: 12, color: "#7a6e61", marginTop: 4 },
+});
