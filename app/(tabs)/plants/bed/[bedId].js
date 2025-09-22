@@ -1,5 +1,5 @@
 // app/(tabs)/plants/bed/[bedId].js
-import React, { useEffect, useState, useLayoutEffect, useMemo, useCallback } from "react";
+import React, { useEffect, useState, useLayoutEffect, useCallback } from "react";
 import {
   View,
   Text,
@@ -20,8 +20,11 @@ import {
   deleteDoc,
   doc,
   serverTimestamp,
+  getDocs,
+  startAt,
+  endAt,
+  limit,
 } from "firebase/firestore";
-import usePlantsCsv from "../../../../src/usePlantsCsv";
 
 /** Ultra-reliable button (works on native & web, avoids nested-pressable issues) */
 function PlainButton({ onPress, style, children, disabled, label }) {
@@ -29,7 +32,9 @@ function PlainButton({ onPress, style, children, disabled, label }) {
     <View
       style={[style, disabled ? { opacity: 0.5 } : null]}
       onStartShouldSetResponder={() => !disabled}
-      onResponderRelease={() => { if (!disabled) onPress?.(); }}
+      onResponderRelease={() => {
+        if (!disabled) onPress?.();
+      }}
       accessibilityRole="button"
       accessibilityLabel={label}
     >
@@ -43,10 +48,7 @@ function toPreviewFromDb(data = {}, docId = "") {
   const safe = (v) => (typeof v === "string" && v.trim().length ? v : null);
 
   const name =
-    safe(data.name) ||
-    safe(data.title) ||
-    safe(data.common_name) ||
-    "Unknown";
+    safe(data.name) || safe(data.title) || safe(data.common_name) || "Unknown";
 
   const binomialName =
     safe(data.binomialName) ||
@@ -55,12 +57,7 @@ function toPreviewFromDb(data = {}, docId = "") {
     safe(data.scientificName) ||
     null;
 
-  const slug = String(
-    safe(data.slug) ||
-    safe(data.id) ||
-    docId ||
-    `plant-${Date.now()}`
-  );
+  const slug = String(safe(data.slug) || safe(data.id) || docId || `plant-${Date.now()}`);
 
   const image =
     safe(data.image) ||
@@ -89,15 +86,19 @@ export default function BedScreen() {
   // Inline confirm states
   const [confirmPlantId, setConfirmPlantId] = useState(null);
 
-  // CSV search state
-  const { loading: csvLoading, error: csvError, search } = usePlantsCsv();
+  // Firestore library search state (publicPlants)
   const [plantQuery, setPlantQuery] = useState("");
-  const csvResults = useMemo(() => search(plantQuery), [plantQuery, search]);
+  const [libResults, setLibResults] = useState([]);
+  const [libLoading, setLibLoading] = useState(false);
+  const [libErr, setLibErr] = useState("");
 
   useLayoutEffect(() => {
-    navigation.setOptions({ title: (typeof name === "string" && name) || "Garden Bed" });
+    navigation.setOptions({
+      title: (typeof name === "string" && name) || "Garden Bed",
+    });
   }, [name, navigation]);
 
+  // Live bed plants list
   useEffect(() => {
     const uid = auth.currentUser?.uid;
     if (!uid || !bedId) return;
@@ -126,37 +127,77 @@ export default function BedScreen() {
     return () => unsub();
   }, [bedId]);
 
+  // Debounced Firestore search of publicPlants by name_lower prefix
+  useEffect(() => {
+    let timer;
+    const run = async () => {
+      const q = (plantQuery || "").trim().toLowerCase();
+      if (!q) {
+        setLibResults([]);
+        setLibLoading(false);
+        setLibErr("");
+        return;
+      }
+      setLibLoading(true);
+      setLibErr("");
+      try {
+        const base = query(
+          collection(db, "publicPlants"),
+          orderBy("name_lower"),
+          startAt(q),
+          endAt(q + "\uf8ff"),
+          limit(25)
+        );
+        const snap = await getDocs(base);
+        const rows = [];
+        snap.forEach((d) => rows.push({ id: d.id, ...d.data() }));
+        setLibResults(rows);
+      } catch (e) {
+        setLibErr(String(e?.message || e));
+        setLibResults([]);
+      } finally {
+        setLibLoading(false);
+      }
+    };
+    timer = setTimeout(run, 250);
+    return () => clearTimeout(timer);
+  }, [plantQuery]);
+
   const openAddPicker = useCallback(() => {
     router.push({ pathname: "/plants/search/[bedId]", params: { bedId } });
   }, [router, bedId]);
 
-  const openDetail = useCallback((item) => {
-    const slug = String(item?.slug || `plant-${Date.now()}`);
-    const fallback = JSON.stringify({
-      id: slug,
-      slug,
-      name: item?.name || "Unknown",
-      binomialName: item?.binomialName || null,
-      image: typeof item?.image === "string" ? item.image : null,
-    });
-    router.push({
-      pathname: "/plants/detail/[cropSlug]",
-      params: { cropSlug: slug, fallback },
-    });
-  }, [router]);
+  const openDetail = useCallback(
+    (item) => {
+      const slug = String(item?.slug || `plant-${Date.now()}`);
+      const fallback = JSON.stringify({
+        id: slug,
+        slug,
+        name: item?.name || "Unknown",
+        binomialName: item?.binomialName || null,
+        image: typeof item?.image === "string" ? item.image : null,
+      });
+      router.push({
+        pathname: "/plants/detail/[cropSlug]",
+        params: { cropSlug: slug, fallback },
+      });
+    },
+    [router]
+  );
 
-  const addCsvPlantToBed = useCallback(
-    async (csvItem) => {
+  const addLibPlantToBed = useCallback(
+    async (libItem) => {
       const uid = auth.currentUser?.uid;
       if (!uid || !bedId) return;
       try {
         const payload = {
-          name: csvItem.name || "",
-          variety: csvItem.variety || "",
-          scientificName: csvItem.scientificName || "",
-          slug: csvItem.slug || "",
-          tags: csvItem.tags || [],
-          source: "csv",
+          name: libItem.name || "",
+          variety: libItem.variety || "",
+          scientificName: libItem.scientificName || "",
+          slug: libItem.slug || libItem.id || "",
+          image: libItem.imageUrl || "",
+          tags: Array.isArray(libItem.tags) ? libItem.tags : [],
+          source: "library",
           addedAt: serverTimestamp(),
         };
         await addDoc(collection(db, "users", uid, "beds", String(bedId), "plants"), payload);
@@ -201,31 +242,31 @@ export default function BedScreen() {
         <Text style={S.addBtnTxt}>Add plant</Text>
       </PlainButton>
 
-      {/* Inline CSV search & add */}
+      {/* Inline library search & add (Firestore: publicPlants) */}
       <View style={S.searchBox}>
-        <Text style={S.h2}>Add from My CSV Plants</Text>
+        <Text style={S.h2}>Add from Library</Text>
         <TextInput
-          placeholder="Search CSV plants by name, variety…"
+          placeholder="Search plants by name or variety…"
           value={plantQuery}
           onChangeText={setPlantQuery}
           style={S.input}
           autoCapitalize="none"
           autoCorrect={false}
         />
-        {csvLoading ? (
+        {libLoading ? (
           <View style={S.centerRow}>
             <ActivityIndicator />
-            <Text style={S.sub}> Loading your plant library…</Text>
+            <Text style={S.sub}> Searching your library…</Text>
           </View>
-        ) : csvError ? (
-          <Text style={S.err}>Couldn’t load plants.csv: {String(csvError.message || csvError)}</Text>
+        ) : libErr ? (
+          <Text style={S.err}>Couldn’t search plants: {libErr}</Text>
         ) : plantQuery.trim() ? (
           <FlatList
-            data={csvResults}
-            keyExtractor={(item) => item.slug || item.name}
+            data={libResults}
+            keyExtractor={(item) => item.slug || item.id || item.name}
             ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
             renderItem={({ item }) => (
-              <View style={S.csvCard}>
+              <View style={S.card}>
                 <View style={{ flex: 1 }}>
                   <Text style={S.title}>
                     {item.name}
@@ -235,7 +276,7 @@ export default function BedScreen() {
                 </View>
                 <PlainButton
                   style={S.addSmallBtn}
-                  onPress={() => addCsvPlantToBed(item)}
+                  onPress={() => addLibPlantToBed(item)}
                   label={`Add ${item.name} to bed`}
                 >
                   <Text style={S.addSmallTxt}>Add</Text>

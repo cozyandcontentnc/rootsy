@@ -1,5 +1,5 @@
-// app/(tabs)/plants/detail/[slug].js
-import React, { useEffect, useMemo, useRef, useState } from "react";
+// app/(tabs)/plants/detail/[cropSlug].js
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -10,7 +10,16 @@ import {
   Pressable,
 } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import usePlantsCsv from "../../../../src/usePlantsCsv";
+import { db } from "../../../../src/firebase";
+import {
+  collection,
+  doc as docRef,
+  getDoc,
+  getDocs,
+  query,
+  where,
+  limit as qlimit,
+} from "firebase/firestore";
 
 // --- utils
 const dash = (v) =>
@@ -19,12 +28,12 @@ const dash = (v) =>
 const joinList = (v) =>
   Array.isArray(v) ? v.filter(Boolean).join(", ") : v || null;
 
-// MM-DD → "Apr 15" (best-effort; shows raw if invalid)
+// MM-DD → "Apr 15"
 function fmtMonthDay(mmdd) {
   if (!mmdd || typeof mmdd !== "string") return "";
   const [mm, dd] = mmdd.split("-").map((x) => parseInt(x, 10));
   if (!mm || !dd) return mmdd;
-  const d = new Date(2024, mm - 1, dd); // year placeholder
+  const d = new Date(2024, mm - 1, dd);
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 function fmtWindow(from, to) {
@@ -42,35 +51,73 @@ const TABS = [
 ];
 
 export default function PlantDetail() {
-  const params = useLocalSearchParams();
+  const { cropSlug } = useLocalSearchParams(); // route param: could be a docId or a slug field
   const router = useRouter();
-  // support either /detail/[slug] or legacy ?cropSlug=
-  const slugParam = params.slug || params.cropSlug;
   const [activeTab, setActiveTab] = useState("glance");
   const scrollRef = useRef(null);
 
-  // Load all plants from the local CSV and pick the one matching slug
-  const { plants, loading, error } = usePlantsCsv();
+  const [plant, setPlant] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setErr] = useState(null);
 
-  const plant = useMemo(() => {
-    const s = String(slugParam || "").toLowerCase();
-    if (!s || !Array.isArray(plants)) return null;
-    // slug match first, then fallback by name+variety
-    return (
-      plants.find((p) => (p.slug || "").toLowerCase() === s) ||
-      plants.find(
-        (p) =>
-          `${(p.name || "").toLowerCase()}-${(p.variety || "")
-            .toLowerCase()
-            .replace(/\s+/g, "-")}` === s
-      ) ||
-      null
-    );
-  }, [slugParam, plants]);
+  const load = useCallback(async () => {
+    setLoading(true);
+    setErr(null);
+    setPlant(null);
+
+    try {
+      const s = String(cropSlug || "").trim();
+      if (!s) throw new Error("Missing cropSlug");
+
+      // 1) Try direct docId in publicPlants
+      const direct = await getDoc(docRef(db, "publicPlants", s));
+      if (direct.exists()) {
+        setPlant({ id: direct.id, ...direct.data() });
+        setLoading(false);
+        return;
+      }
+
+      // 2) Try where('slug','==', s)
+      const q1 = query(
+        collection(db, "publicPlants"),
+        where("slug", "==", s),
+        qlimit(1)
+      );
+      const snap1 = await getDocs(q1);
+      if (!snap1.empty) {
+        const d = snap1.docs[0];
+        setPlant({ id: d.id, ...d.data() });
+        setLoading(false);
+        return;
+      }
+
+      // 3) Optional fallback — if you use a composite slug field
+      //    like `${name}-${variety.toLowerCase().replace(/\s+/g,'-')}`
+      const q2 = query(
+        collection(db, "publicPlants"),
+        where("nameVarietySlug", "==", s),
+        qlimit(1)
+      );
+      const snap2 = await getDocs(q2);
+      if (!snap2.empty) {
+        const d = snap2.docs[0];
+        setPlant({ id: d.id, ...d.data() });
+        setLoading(false);
+        return;
+      }
+
+      setLoading(false);
+      setPlant(null);
+    } catch (e) {
+      setErr(e);
+      setLoading(false);
+    }
+  }, [cropSlug]);
 
   useEffect(() => {
     setActiveTab("glance");
-  }, [slugParam]);
+    load();
+  }, [cropSlug, load]);
 
   const handleTab = (key) => {
     setActiveTab(key);
@@ -89,8 +136,11 @@ export default function PlantDetail() {
   if (error) {
     return (
       <View style={S.pad}>
-        <Text style={S.err}>Couldn’t load plants.csv</Text>
+        <Text style={S.err}>Couldn’t load plant</Text>
         <Text style={S.sub}>{String(error.message || error)}</Text>
+        <Pressable onPress={() => router.back()} style={[S.btn, { marginTop: 12 }]}>
+          <Text style={S.btnText}>Go Back</Text>
+        </Pressable>
       </View>
     );
   }
@@ -100,7 +150,8 @@ export default function PlantDetail() {
       <View style={S.pad}>
         <Text style={S.h1}>No data for this plant.</Text>
         <Text style={S.sub}>
-          Make sure the slug matches a row in your CSV (column “slug”).
+          We couldn’t find a <Text style={{ fontWeight: "700" }}>publicPlants</Text> document with
+          this id or slug.
         </Text>
         <Pressable onPress={() => router.back()} style={[S.btn, { marginTop: 12 }]}>
           <Text style={S.btnText}>Go Back</Text>
@@ -116,7 +167,6 @@ export default function PlantDetail() {
         {plant.variety ? ` — ${plant.variety}` : ""}
       </Text>
       {!!plant.scientificName && <Text style={S.sub}>{plant.scientificName}</Text>}
-
       {!!plant.imageUrl && (
         <Image source={{ uri: plant.imageUrl }} style={S.img} resizeMode="cover" />
       )}
@@ -187,7 +237,10 @@ export default function PlantDetail() {
             label="Sow outdoors"
             value={fmtWindow(plant.sowingOutdoorFrom, plant.sowingOutdoorTo)}
           />
-          <Row label="Planting depth" value={plant.plantingDepthIn ? `${plant.plantingDepthIn}"` : "—"} />
+          <Row
+            label="Planting depth"
+            value={plant.plantingDepthIn ? `${plant.plantingDepthIn}"` : "—"}
+          />
           <Row
             label="Germination"
             value={
@@ -221,14 +274,8 @@ export default function PlantDetail() {
             value={plant.spacingBetweenRowsIn ? `${plant.spacingBetweenRowsIn}"` : "—"}
           />
           <Row label="Frost hardiness" value={dash(plant.frostHardiness)} />
-          <Row
-            label="Height"
-            value={plant.heightIn ? `${plant.heightIn}"` : "—"}
-          />
-          <Row
-            label="Spread"
-            value={plant.spreadIn ? `${plant.spreadIn}"` : "—"}
-          />
+          <Row label="Height" value={plant.heightIn ? `${plant.heightIn}"` : "—"} />
+          <Row label="Spread" value={plant.spreadIn ? `${plant.spreadIn}"` : "—"} />
           {!!joinList(plant.companionPlants) && (
             <Row label="Companions" value={joinList(plant.companionPlants)} />
           )}
@@ -252,14 +299,11 @@ export default function PlantDetail() {
         </Section>
       )}
 
-      {!!plant.sourceUrl && (
-        <Text style={S.source}>Source: {plant.sourceUrl}</Text>
-      )}
+      {!!plant.sourceUrl && <Text style={S.source}>Source: {plant.sourceUrl}</Text>}
     </ScrollView>
   );
 }
 
-// Presentational
 function Section({ title, children }) {
   return (
     <View style={S.section}>
@@ -283,7 +327,7 @@ const S = StyleSheet.create({
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
   pad: { padding: 16 },
   h1: { fontSize: 22, fontWeight: "800", color: "#4a3f35" },
-  sub: { color: "#6b5a50", marginTop: 4, marginBottom: 12, textAlign: "center" },
+  sub: { color: "#6b5a50", marginTop: 4, marginBottom: 12 },
   img: {
     width: "100%",
     height: 220,
@@ -322,5 +366,17 @@ const S = StyleSheet.create({
   p: { color: "#4a3f35", marginTop: 6, lineHeight: 20 },
   empty: { color: "#6b5a50", marginTop: 6 },
   err: { color: "#B3261E", fontWeight: "700", marginBottom: 8 },
+
+  btn: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e5dcc9",
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    alignSelf: "flex-start",
+  },
+  btnText: { color: "#4a3f35", fontWeight: "700" },
+
   source: { color: "#6b5a50", marginTop: 14, fontStyle: "italic" },
 });

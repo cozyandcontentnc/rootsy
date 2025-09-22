@@ -1,132 +1,187 @@
-// app/(tabs)/plants/
-// 🔁 CSV-only version: searches your bundled plants.csv and adds to a bed
-
-import React, { useEffect, useMemo, useState } from "react";
+// app/(tabs)/plants/search/[bedId].js
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
-  View, Text, TextInput, FlatList, Image, Pressable,
-  StyleSheet, ActivityIndicator, Alert, Platform,
+  View,
+  Text,
+  TextInput,
+  FlatList,
+  StyleSheet,
+  ActivityIndicator,
 } from "react-native";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useLocalSearchParams, useNavigation } from "expo-router";
 import { auth, db } from "../../../../src/firebase";
-import { addDoc, collection, serverTimestamp } from "firebase/firestore";
-import usePlantsCsv from "../../../../src/usePlantsCsv";
+import {
+  addDoc,
+  collection,
+  serverTimestamp,
+  query as fsQuery,
+  orderBy,
+  startAt,
+  endAt,
+  limit,
+  getDocs,
+} from "firebase/firestore";
+
+/** Ultra-reliable button (works on native & web, avoids nested-pressable issues) */
+function PlainButton({ onPress, style, children, disabled, label }) {
+  return (
+    <View
+      style={[style, disabled ? { opacity: 0.5 } : null]}
+      onStartShouldSetResponder={() => !disabled}
+      onResponderRelease={() => {
+        if (!disabled) onPress?.();
+      }}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+    >
+      {children}
+    </View>
+  );
+}
 
 const MIN_LEN = 2;
 
-export default function PlantSearch() {
-  const { bedId } = useLocalSearchParams();
-  const router = useRouter();
-
-  // load local CSV library + build search helper
-  const { plants, loading, error, search } = usePlantsCsv();
+export default function PlantSearchForBed() {
+  const { bedId, name } = useLocalSearchParams();
+  const navigation = useNavigation();
 
   const [q, setQ] = useState("");
-  const [debouncedQ, setDebouncedQ] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [results, setResults] = useState([]);
 
-  // simple debounce
   useEffect(() => {
-    const t = setTimeout(() => setDebouncedQ((q || "").trim()), 350);
-    return () => clearTimeout(t);
+    navigation.setOptions({
+      title:
+        (typeof name === "string" && name ? `Add to ${name}` : "Add Plant to Bed"),
+    });
+  }, [name, navigation]);
+
+  // Debounced search in publicPlants (prefix on name_lower)
+  useEffect(() => {
+    let timer;
+    const run = async () => {
+      const queryText = (q || "").trim().toLowerCase();
+      if (queryText.length < MIN_LEN) {
+        setResults([]);
+        setLoading(false);
+        setErr("");
+        return;
+      }
+      setLoading(true);
+      setErr("");
+      try {
+        const base = fsQuery(
+          collection(db, "publicPlants"),
+          orderBy("name_lower"),
+          startAt(queryText),
+          endAt(queryText + "\uf8ff"),
+          limit(30)
+        );
+        const snap = await getDocs(base);
+        const rows = [];
+        snap.forEach((d) => rows.push({ id: d.id, ...d.data() }));
+        setResults(rows);
+      } catch (e) {
+        setErr(String(e?.message || e));
+        setResults([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+    timer = setTimeout(run, 250);
+    return () => clearTimeout(timer);
   }, [q]);
 
-  const results = useMemo(() => {
-    if (!debouncedQ || debouncedQ.length < MIN_LEN) return [];
-    return search(debouncedQ);
-  }, [debouncedQ, search]);
+  const addToBed = useCallback(
+    async (item) => {
+      const uid = auth.currentUser?.uid;
+      if (!uid || !bedId) {
+        setErr("You must be signed in and have a valid bed.");
+        return;
+      }
+      try {
+        const payload = {
+          name: item.name || "",
+          variety: item.variety || "",
+          scientificName: item.scientificName || "",
+          slug: item.slug || item.id || "",
+          image: item.imageUrl || "",
+          tags: Array.isArray(item.tags) ? item.tags : [],
+          source: "library",
+          addedAt: serverTimestamp(),
+        };
+        await addDoc(
+          collection(db, "users", uid, "beds", String(bedId), "plants"),
+          payload
+        );
+      } catch (e) {
+        setErr(String(e?.message || e));
+      }
+    },
+    [bedId]
+  );
 
-  const addToBed = async (item) => {
-    const uid = auth.currentUser?.uid;
-    if (!uid) {
-      Alert.alert("Not signed in", "Please sign in first.");
-      return;
-    }
-    if (!bedId) {
-      Alert.alert("Missing bed", "No bed selected.");
-      return;
-    }
-
-    // build the payload from CSV fields
-    const crop = {
-      slug: item?.slug || `plant-${Date.now()}`,
-      name: item?.name || "Unknown",
-      variety: item?.variety || "",
-      scientificName: item?.scientificName || "",
-      imageUrl: typeof item?.imageUrl === "string" ? item.imageUrl : "",
-      source: "local-csv",
-    };
-
-    try {
-      await addDoc(collection(db, "users", uid, "beds", bedId, "plants"), {
-        ...crop,
-        addedAt: serverTimestamp(),
-      });
-
-      Alert.alert("Added!", `${crop.name}${crop.variety ? ` — ${crop.variety}` : ""} added to your bed.`);
-      // go straight back to the bed screen
-      router.replace({ pathname: "/plants/bed/[bedId]", params: { bedId } });
-    } catch (e) {
-      Alert.alert("Error", String(e?.message || e));
-    }
-  };
-
-  const showEmpty =
-    (debouncedQ?.length ?? 0) >= MIN_LEN &&
-    !loading &&
-    results.length === 0 &&
-    !error;
+  const header = useMemo(
+    () => (
+      <View style={S.searchBox}>
+        <Text style={S.h1}>Search Library</Text>
+        <TextInput
+          value={q}
+          onChangeText={setQ}
+          placeholder={`Search plants (min ${MIN_LEN} letters)…`}
+          autoCapitalize="none"
+          autoCorrect={false}
+          style={S.input}
+        />
+        {loading ? (
+          <View style={S.centerRow}>
+            <ActivityIndicator />
+            <Text style={S.sub}> Searching…</Text>
+          </View>
+        ) : err ? (
+          <Text style={S.err}>Error: {err}</Text>
+        ) : q.trim().length < MIN_LEN ? (
+          <Text style={S.sub}>
+            Type at least {MIN_LEN} letters to search your library.
+          </Text>
+        ) : null}
+      </View>
+    ),
+    [q, loading, err]
+  );
 
   return (
     <View style={S.wrap}>
-      <TextInput
-        placeholder={`Search plants — ${MIN_LEN}+ chars`}
-        value={q}
-        onChangeText={setQ}
-        style={S.input}
-        autoCorrect={false}
-        autoCapitalize="none"
-        returnKeyType="search"
-        onSubmitEditing={() => setDebouncedQ((q || "").trim())}
-      />
-
-      {loading && (
-        <View style={{ marginVertical: 12, alignItems: "center" }}>
-          <ActivityIndicator />
-          <Text style={S.sub}>Loading your plant library…</Text>
-        </View>
-      )}
-
-      {!!error && (
-        <Text style={S.err}>
-          {String(error.message || error)}
-          {Platform.OS === "web" ? "\nTip: ensure assets/data/plants.csv exists." : ""}
-        </Text>
-      )}
-
-      {showEmpty && <Text style={S.empty}>No plants found. Try a different term.</Text>}
-
+      {header}
       <FlatList
-        data={Array.isArray(results) ? results : []}
-        keyExtractor={(i, idx) => (i?.slug ? String(i.slug) : `k${idx}`)}
+        data={results}
+        keyExtractor={(item) => item.slug || item.id || item.name}
         contentContainerStyle={{ paddingBottom: 24 }}
+        ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
         renderItem={({ item }) => (
-          <View style={S.row}>
-            {typeof item?.imageUrl === "string" && !!item.imageUrl ? (
-              <Image source={{ uri: item.imageUrl }} style={S.img} />
-            ) : (
-              <View style={[S.img, { backgroundColor: "#eee" }]} />
-            )}
+          <View style={S.card}>
             <View style={{ flex: 1 }}>
               <Text style={S.title}>
-                {item?.name || "Unnamed plant"}
-                {item?.variety ? ` — ${item.variety}` : ""}
+                {item.name}
+                {item.variety ? ` — ${item.variety}` : ""}
               </Text>
-              {item?.scientificName ? <Text style={S.sub}>{item.scientificName}</Text> : null}
-              <Pressable style={S.add} onPress={() => addToBed(item)}>
-                <Text style={S.addTxt}>Add to bed</Text>
-              </Pressable>
+              {!!item.scientificName && <Text style={S.sub}>{item.scientificName}</Text>}
             </View>
+            <PlainButton
+              style={S.addBtn}
+              onPress={() => addToBed(item)}
+              label={`Add ${item.name}`}
+            >
+              <Text style={S.addTxt}>Add</Text>
+            </PlainButton>
           </View>
         )}
+        ListEmptyComponent={
+          q.trim().length >= MIN_LEN && !loading && !err ? (
+            <Text style={[S.sub, { padding: 12 }]}>No matches.</Text>
+          ) : null
+        }
       />
     </View>
   );
@@ -134,22 +189,47 @@ export default function PlantSearch() {
 
 const S = StyleSheet.create({
   wrap: { flex: 1, padding: 16, backgroundColor: "#fffaf3" },
+
+  searchBox: {
+    borderWidth: 1,
+    borderColor: "#e5dcc9",
+    backgroundColor: "#fbf4eb",
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+  },
+  h1: { fontSize: 18, fontWeight: "800", color: "#4a3f35", marginBottom: 6 },
   input: {
-    borderWidth: 1, borderColor: "#e5dcc9", borderRadius: 10,
-    padding: 10, backgroundColor: "white", marginBottom: 12, color: "#4a3f35",
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 10,
+    backgroundColor: "white",
+    borderColor: "#e5dcc9",
+    color: "#4a3f35",
   },
-  sub: { color: "#6b5a50", marginTop: 6, textAlign: "center" },
-  err: { color: "#B3261E", marginVertical: 8, whiteSpace: "pre-wrap" },
-  empty: { color: "#6b5a50", marginVertical: 8 },
-  row: {
-    flexDirection: "row", gap: 12, borderWidth: 1, borderColor: "#e5dcc9",
-    borderRadius: 12, padding: 10, backgroundColor: "#fbf4eb", marginBottom: 10,
+
+  centerRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 },
+  sub: { color: "#6b5a50", marginTop: 4 },
+  err: { color: "#B3261E", marginTop: 8, fontWeight: "700" },
+
+  card: {
+    flexDirection: "row",
+    gap: 12,
+    alignItems: "center",
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "#e5dcc9",
+    borderRadius: 12,
+    backgroundColor: "#fbf4eb",
   },
-  img: { width: 64, height: 64, borderRadius: 8 },
-  title: { fontWeight: "700", color: "#4a3f35" },
-  add: {
-    alignSelf: "flex-start", marginTop: 8, backgroundColor: "#A26769",
-    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10,
+
+  addBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: "#557755",
   },
-  addTxt: { color: "#fff", fontWeight: "700" },
+  addTxt: { color: "#fff", fontWeight: "800" },
+
+  title: { fontSize: 16, fontWeight: "700", color: "#4a3f35" },
 });
