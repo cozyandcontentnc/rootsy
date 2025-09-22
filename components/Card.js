@@ -1,4 +1,5 @@
 import { View } from "react-native";
+import { smallShadow } from "../src/ui/shadows";
 
 export default function Card({ children }) {
   return (
@@ -10,9 +11,7 @@ export default function Card({ children }) {
         borderWidth: 1,
         borderColor: "#e5dcc9",
         marginBottom: 8,
-        shadowColor: "#000",
-        shadowOpacity: 0.05,
-        shadowRadius: 6
+        ...require("../src/ui/shadows").smallShadow,
       }}
     >
       {children}

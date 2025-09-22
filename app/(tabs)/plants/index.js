@@ -1,13 +1,11 @@
 // app/(tabs)/plants/index.js
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   View,
   Text,
   TextInput,
   FlatList,
   ActivityIndicator,
-  Pressable,
-  Alert,
   StyleSheet,
 } from "react-native";
 import {
@@ -17,19 +15,34 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  getDocs,
+  doc,
+  writeBatch,
 } from "firebase/firestore";
 import { onAuthStateChanged } from "firebase/auth";
 import { auth, db } from "../../../src/firebase";
-import { Link, useRouter } from "expo-router";
-import Card from "../../../components/Card";
+import { useRouter } from "expo-router";
+import { smallShadow } from "../../../src/ui/shadows";
+import { Link } from "expo-router";
 
-// CSV loader (local-only plant library)
-import usePlantsCsv from "../../../src/usePlantsCsv";
+/** Same responder-based button as bed screen */
+function PlainButton({ onPress, style, children, disabled, label }) {
+  return (
+    <View
+      style={[style, disabled ? { opacity: 0.5 } : null]}
+      onStartShouldSetResponder={() => !disabled}
+      onResponderRelease={() => { if (!disabled) onPress?.(); }}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+    >
+      {children}
+    </View>
+  );
+}
 
 export default function Plants() {
   const router = useRouter();
 
-  // ----- Auth + Beds (unchanged core logic) -----
   const [authChecked, setAuthChecked] = useState(false);
   const [user, setUser] = useState(null);
 
@@ -38,6 +51,8 @@ export default function Plants() {
   const [newBed, setNewBed] = useState("");
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+
+  const [confirmBedId, setConfirmBedId] = useState(null);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -85,8 +100,8 @@ export default function Plants() {
     return beds.filter((b) => (b.name || "").toLowerCase().includes(s));
   }, [qtext, beds]);
 
-  const addBed = async () => {
-    if (!user) return Alert.alert("Not signed in", "Please sign in first.");
+  const addBed = useCallback(async () => {
+    if (!user) return;
     const name = newBed.trim();
     if (!name) return;
 
@@ -97,16 +112,47 @@ export default function Plants() {
       });
       setNewBed("");
     } catch (e) {
-      Alert.alert("Error", String(e?.message || e));
+      setErr(String(e?.message || e));
     }
-  };
+  }, [newBed, user]);
 
-  // ----- CSV Plants (local-only library + search) -----
-  const { plants, loading: plantsLoading, error: plantsError, search } = usePlantsCsv();
-  const [plantQuery, setPlantQuery] = useState("");
-  const plantResults = useMemo(() => search(plantQuery), [plantQuery, search]);
+  const confirmDelete = useCallback((bedId) => setConfirmBedId(bedId), []);
+  const cancelDelete = useCallback(() => setConfirmBedId(null), []);
 
-  // Loading auth or beds
+  const actuallyDeleteBed = useCallback(async (bedId) => {
+    if (!user) return;
+    try {
+      const batch = writeBatch(db);
+
+      // delete subcollection plants
+      const plantsSnap = await getDocs(
+        collection(db, "users", user.uid, "beds", bedId, "plants")
+      );
+      plantsSnap.forEach((p) =>
+        batch.delete(doc(db, "users", user.uid, "beds", bedId, "plants", p.id))
+      );
+
+      // delete the bed itself
+      batch.delete(doc(db, "users", user.uid, "beds", bedId));
+
+      await batch.commit();
+    } catch (e) {
+      setErr(String(e?.message || e));
+    } finally {
+      setConfirmBedId(null);
+    }
+  }, [user]);
+
+  const goToBed = useCallback(
+    (bed) => {
+      router.push({
+        pathname: "/plants/bed/[bedId]",
+        params: { bedId: bed.id, name: bed.name ?? "" },
+      });
+    },
+    [router]
+  );
+
   if (!authChecked || loading) {
     return (
       <View style={S.center}>
@@ -118,53 +164,33 @@ export default function Plants() {
     );
   }
 
-  // Signed-out view (now also shows the local CSV plant browser)
   if (!user) {
     return (
-      <View style={{ flex: 1 }}>
-        <View style={{ padding: 16, gap: 8 }}>
-          <Text style={S.h1}>Garden Beds</Text>
-          <Text style={S.sub}>Sign in to create beds and add plants.</Text>
-          <Pressable onPress={() => router.push("/login")} style={S.btn}>
-            <Text style={S.btnText}>Go to Login</Text>
-          </Pressable>
-        </View>
-
-        <View style={S.divider} />
-
-        <PlantsBrowser
-          plantQuery={plantQuery}
-          setPlantQuery={setPlantQuery}
-          plantsLoading={plantsLoading}
-          plantsError={plantsError}
-          plantResults={plantResults}
-          onOpenDetail={(slug) => router.push(`/plants/detail/${slug}`)}
-        />
+      <View style={{ flex: 1, padding: 16, gap: 12 }}>
+        <Text style={S.h1}>Garden Beds</Text>
+        <Text style={S.sub}>Sign in to create beds and add plants.</Text>
       </View>
     );
   }
 
-  // Error (while signed in)
   if (err) {
     return (
       <View style={{ padding: 16 }}>
         <Text style={{ color: "#B3261E", marginBottom: 8 }}>Error: {err}</Text>
         <Text style={{ color: "#6b5a50" }}>
           Make sure your Firestore rules allow access to{" "}
-          <Text style={{ fontWeight: "700" }}>/users/{"{uid}"}/beds</Text> for the signed-in user.
+          <Text style={{ fontWeight: "700" }}>/users/{"{uid}"}/beds</Text>.
         </Text>
       </View>
     );
   }
 
-  // Signed-in normal UI: Beds manager + CSV plant browser
   return (
     <FlatList
       ListHeaderComponent={
         <View style={{ padding: 16, gap: 12 }}>
           <Text style={S.h1}>Garden Beds</Text>
 
-          {/* Create new bed */}
           <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
             <TextInput
               placeholder="New bed name (e.g., Front Left)"
@@ -172,12 +198,16 @@ export default function Plants() {
               onChangeText={setNewBed}
               style={S.input}
             />
-            <Pressable onPress={addBed} style={S.btn}>
+            <PlainButton style={S.btn} onPress={addBed} label="Add bed">
               <Text style={S.btnText}>Add</Text>
-            </Pressable>
+            </PlainButton>
+            <Link href="/plants/catalog">
+  <View style={{ alignSelf: "flex-start", backgroundColor: "#7b8b6f", paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10 }}>
+    <Text style={{ color: "white", fontWeight: "800" }}>Open Plant Catalog</Text>
+  </View>
+</Link>
           </View>
 
-          {/* Search beds */}
           <TextInput
             placeholder="Search beds…"
             value={qtext}
@@ -189,104 +219,53 @@ export default function Plants() {
       data={filteredBeds}
       keyExtractor={(item) => item.id}
       renderItem={({ item }) => (
-        <Card style={{ marginHorizontal: 16, marginBottom: 8 }}>
-          <Link
-            href={{
-              pathname: "/plants/bed/[bedId]",
-              params: { bedId: item.id, name: item.name ?? "" },
-            }}
+        <View style={S.card}>
+          <PlainButton
+            onPress={() => goToBed(item)}
+            style={{ flex: 1, paddingVertical: 8 }}
+            label={`Open bed ${item.name}`}
           >
-            <View>
-              <Text style={{ fontWeight: "700", color: "#4a3f35" }}>{item.name}</Text>
-              <View style={{ flexDirection: "row", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
-                <Pill>Tap to view plants</Pill>
-                <Pill>+ Add plants</Pill>
-              </View>
+            <Text style={{ fontWeight: "700", color: "#4a3f35" }}>{item.name}</Text>
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+              <Pill>Tap to view plants</Pill>
+              <Pill>+ Add plants</Pill>
             </View>
-          </Link>
-        </Card>
+          </PlainButton>
+
+          {confirmBedId === item.id ? (
+            <View style={S.confirmWrap}>
+              <PlainButton
+                style={[S.confirmBtn, { backgroundColor: "#9d2b2b" }]}
+                onPress={() => actuallyDeleteBed(item.id)}
+                label={`Confirm delete ${item.name}`}
+              >
+                <Text style={S.confirmTxt}>Confirm</Text>
+              </PlainButton>
+              <PlainButton
+                style={[S.confirmBtn, { backgroundColor: "#7a6e61" }]}
+                onPress={cancelDelete}
+                label="Cancel delete"
+              >
+                <Text style={S.confirmTxt}>Cancel</Text>
+              </PlainButton>
+            </View>
+          ) : (
+            <PlainButton
+              onPress={() => confirmDelete(item.id)}
+              style={S.deleteBtn}
+              label={`Delete bed ${item.name}`}
+            >
+              <Text style={S.deleteBtnText}>Delete</Text>
+            </PlainButton>
+          )}
+        </View>
       )}
       ListEmptyComponent={
         <Text style={{ color: "#6b5a50", paddingHorizontal: 16 }}>
           No beds yet. Add your first one above.
         </Text>
       }
-      ListFooterComponent={
-        <View style={{ marginTop: 16 }}>
-          <View style={S.divider} />
-          <PlantsBrowser
-            plantQuery={plantQuery}
-            setPlantQuery={setPlantQuery}
-            plantsLoading={plantsLoading}
-            plantsError={plantsError}
-            plantResults={plantResults}
-            onOpenDetail={(slug) => router.push(`/plants/detail/${slug}`)}
-          />
-        </View>
-      }
     />
-  );
-}
-
-function PlantsBrowser({
-  plantQuery,
-  setPlantQuery,
-  plantsLoading,
-  plantsError,
-  plantResults,
-  onOpenDetail,
-}) {
-  return (
-    <View style={{ padding: 16, gap: 12 }}>
-      <Text style={S.h1}>Browse Plants</Text>
-      <TextInput
-        placeholder="Search by name, variety, alias…"
-        value={plantQuery}
-        onChangeText={setPlantQuery}
-        style={S.input}
-        autoCapitalize="none"
-        autoCorrect={false}
-      />
-
-      {plantsLoading ? (
-        <View style={S.center}>
-          <ActivityIndicator />
-          <Text style={S.sub}>Loading your plant library…</Text>
-        </View>
-      ) : plantsError ? (
-        <View>
-          <Text style={{ color: "#B3261E", marginBottom: 4 }}>
-            Couldn’t load plants.csv
-          </Text>
-          <Text style={S.sub}>{String(plantsError.message || plantsError)}</Text>
-        </View>
-      ) : (
-        <FlatList
-          data={plantResults}
-          keyExtractor={(item) => item.slug || item.name}
-          ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
-          renderItem={({ item }) => (
-            <Pressable onPress={() => onOpenDetail(item.slug)} style={S.card}>
-              <View style={{ flex: 1 }}>
-                <Text style={S.cardTitle}>
-                  {item.name}
-                  {item.variety ? ` — ${item.variety}` : ""}
-                </Text>
-                {!!item.scientificName && (
-                  <Text style={S.sci}>{item.scientificName}</Text>
-                )}
-                {!!item.tags?.length && (
-                  <Text style={S.tags}>{item.tags.join(" · ")}</Text>
-                )}
-              </View>
-            </Pressable>
-          )}
-          ListEmptyComponent={
-            <Text style={S.sub}>No matches found.</Text>
-          }
-        />
-      )}
-    </View>
   );
 }
 
@@ -328,12 +307,6 @@ const S = StyleSheet.create({
     borderColor: "#e5dcc9",
     color: "#4a3f35",
   },
-  divider: {
-    height: 1,
-    backgroundColor: "#efe7d6",
-    marginHorizontal: 16,
-    marginVertical: 8,
-  },
   card: {
     backgroundColor: "#fffaf3",
     padding: 12,
@@ -341,8 +314,23 @@ const S = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#e5dcc9",
     marginHorizontal: 16,
+    marginBottom: 8,
+    ...smallShadow,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
   },
-  cardTitle: { fontSize: 16, fontWeight: "700", color: "#4a3f35" },
-  sci: { fontSize: 13, color: "#6b5a50", marginTop: 2, fontStyle: "italic" },
-  tags: { fontSize: 12, color: "#7a6e61", marginTop: 4 },
+  deleteBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#e5c9c9",
+    backgroundColor: "#f9e7e7",
+  },
+  deleteBtnText: { color: "#9d2b2b", fontWeight: "800" },
+
+  confirmWrap: { flexDirection: "row", gap: 8 },
+  confirmBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10 },
+  confirmTxt: { color: "#fff", fontWeight: "800" },
 });

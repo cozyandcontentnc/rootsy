@@ -1,0 +1,20 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function authed() { return request.auth != null; }
+
+    // Public plant gallery (approved images)
+    match /plants/{plantId}/images/{imageId} {
+      allow read: if true;
+      allow write: if false;   // copied in by Functions when a proposal is accepted
+    }
+
+    // Temporary uploads for proposals
+    match /proposals/{proposalId}/{fileId} {
+      allow read: if authed();
+      allow write: if authed()
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+    }
+  }
+}

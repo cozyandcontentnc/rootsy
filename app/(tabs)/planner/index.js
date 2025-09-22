@@ -3,7 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { View, Text, TextInput, Pressable, ScrollView } from "react-native";
 import * as Location from "expo-location";
 import { Link } from "expo-router";
-import { db } from "../../../src/firebase";
+import { auth, db } from "../../../src/firebase";
+import { onAuthStateChanged } from "firebase/auth";
 import {
   collection, doc, getDoc, getDocs, orderBy, query, setDoc,
   serverTimestamp, Timestamp
@@ -43,6 +44,9 @@ async function findSpringLastFrost(lat, lon, year) {
 }
 
 export default function Planner() {
+  const [user, setUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
   const [plants, setPlants] = useState([]);
   const [frostInput, setFrostInput] = useState(""); // YYYY-MM-DD
   const [wateringCadenceDays, setWateringCadenceDays] = useState("3");
@@ -53,13 +57,25 @@ export default function Planner() {
   const [locErr, setLocErr] = useState("");
   const [banner, setBanner] = useState("");
 
-  // Load plants + settings
+  // Watch auth state
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u ?? null);
+      setAuthChecked(true);
+    });
+    return unsub;
+  }, []);
+
+  // Load plants (from shared catalog) + settings (per-user)
   useEffect(() => {
     (async () => {
-      const snap = await getDocs(query(collection(db, "plants"), orderBy("commonName")));
+      // Always load public plants for the timeline
+      const snap = await getDocs(query(collection(db, "publicPlants"), orderBy("commonName")));
       setPlants(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
 
-      const sref = doc(db, "settings", "app");
+      // Load settings only if signed in
+      if (!authChecked || !user) return;
+      const sref = doc(db, "users", user.uid, "settings", "app");
       const sdoc = await getDoc(sref);
       const s = sdoc.exists() ? sdoc.data() : {};
       setFrostInput(typeof s.lastFrost === "string" ? s.lastFrost : "2025-04-15");
@@ -70,18 +86,19 @@ export default function Planner() {
         s.wateringWeeks != null ? String(s.wateringWeeks) : "4"
       );
     })();
-  }, []);
+  }, [authChecked, user]);
 
   const lastFrost = useMemo(() => toDate(frostInput), [frostInput]);
 
   const saveSettings = async () => {
+    if (!user) { setBanner("Sign in to save settings."); setTimeout(() => setBanner(""), 2000); return; }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(frostInput)) return;
     const cadence = Math.max(1, parseInt(wateringCadenceDays || "3", 10) || 3);
     const weeks = Math.max(1, parseInt(wateringWeeks || "4", 10) || 4);
     setSaving(true);
     try {
       await setDoc(
-        doc(db, "settings", "app"),
+        doc(db, "users", user.uid, "settings", "app"),
         { lastFrost: frostInput, wateringCadenceDays: cadence, wateringWeeks: weeks },
         { merge: true }
       );
@@ -93,6 +110,7 @@ export default function Planner() {
   };
 
   const useMyLocation = async () => {
+    if (!user) { setBanner("Sign in to use location."); setTimeout(() => setBanner(""), 2000); return; }
     setEstimating(true);
     setLocErr("");
     try {
@@ -107,7 +125,7 @@ export default function Planner() {
       if (!frost) throw new Error("Could not estimate from local history.");
 
       setFrostInput(frost);
-      await setDoc(doc(db, "settings", "app"), { lastFrost: frost }, { merge: true });
+      await setDoc(doc(db, "users", user.uid, "settings", "app"), { lastFrost: frost }, { merge: true });
       setBanner(`Estimated last frost set to ${frost}.`);
       setTimeout(() => setBanner(""), 2500);
     } catch (e) {
@@ -151,6 +169,7 @@ export default function Planner() {
   // ---- Auto-create tasks (idempotent via deterministic doc IDs) ----
   async function createTasksForPlant(row) {
     if (!lastFrost) return;
+    if (!user) { setBanner("Sign in to create tasks."); setTimeout(() => setBanner(""), 2000); return; }
 
     const slug =
       row.p.slug ||
@@ -192,6 +211,7 @@ export default function Planner() {
       await setDoc(
         doc(collection(db, "tasks"), id),
         {
+          ownerId: user.uid,               // REQUIRED by rules
           type: t.type,
           notes: t.notes,
           dueAt: Timestamp.fromDate(t.due),
@@ -295,6 +315,11 @@ export default function Planner() {
         ) : null}
         {locErr ? (
           <Text style={{ color: "#B3261E", marginTop: 6 }}>{locErr}</Text>
+        ) : null}
+        {!user ? (
+          <Text style={{ color: "#6b5a50", marginTop: 6 }}>
+            Tip: sign in to save settings and create tasks.
+          </Text>
         ) : null}
       </Card>
 

@@ -1,0 +1,71 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function authed() { return request.auth != null; }
+    function isModerator() { return authed() && request.auth.token.moderator == true; }
+
+    // ===== PUBLISHED, READ-ONLY (client) =====
+    match /publicPlants/{plantId} {
+      allow read: if true;                 // anyone can read
+      allow write: if false;               // only via Cloud Functions
+    }
+
+    // ===== USER PROPOSALS (add/edit requests) =====
+    match /plantProposals/{proposalId} {
+      allow read: if authed();             // or 'true' if you want transparency
+      allow create: if authed()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.type in ['create','update']
+        && request.resource.data.diff is map
+        && request.resource.data.diff.size() > 0
+        && request.resource.data.diff.size() <= 50
+        && !('createdAt' in request.resource.data)
+        && !('reviewedAt' in request.resource.data)
+        && !('reviewedBy' in request.resource.data)
+        && !('status' in request.resource.data);  // status is server-managed
+      // Allow the author to edit their own proposal text/notes while pending (not status):
+      allow update: if authed()
+        && resource.data.createdBy == request.auth.uid
+        && resource.data.status == 'pending'
+        && request.resource.data.status == resource.data.status;
+      allow delete: if false;
+    }
+
+    // ===== IMMUTABLE VERSION HISTORY =====
+    match /plantVersions/{versionId} {
+      allow read: if true;
+      allow write: if false;               // Functions only
+    }
+
+    // ===== FLAGS (moderation) =====
+    match /plantFlags/{flagId} {
+      allow read: if isModerator();
+      allow create: if authed()
+        && request.resource.data.plantId is string
+        && request.resource.data.reason in ['spam','inaccurate','copyright','other']
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isModerator();
+      allow delete: if false;
+    }
+
+    // ===== EXISTING APP AREAS YOU ALREADY USE =====
+    // Per-user settings
+    match /users/{uid}/settings/{docId} {
+      allow read, write: if authed() && uid == request.auth.uid;
+    }
+
+    // Per-user beds & plants in beds (what your Plants screen uses today)
+    match /users/{uid}/beds/{bedId} {
+      allow read, write: if authed() && uid == request.auth.uid;
+    }
+    match /users/{uid}/beds/{bedId}/plants/{plantId} {
+      allow read, write: if authed() && uid == request.auth.uid;
+    }
+
+    // Tasks (if you keep them top-level)
+    match /tasks/{taskId} {
+      allow create: if authed() && request.resource.data.ownerId == request.auth.uid;
+      allow read, update, delete: if authed() && resource.data.ownerId == request.auth.uid;
+    }
+  }
+}

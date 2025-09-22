@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "publicPlants",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "search.ngrams", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "commonName", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

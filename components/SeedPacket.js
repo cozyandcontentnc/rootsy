@@ -1,6 +1,8 @@
 // components/SeedPacket.js
 import React from "react";
 import { View, Text, StyleSheet, Pressable } from "react-native";
+import { cardShadow } from "../src/ui/shadows";      // cross-platform shadow (web: boxShadow, native: shadow*+elevation)
+import { softTextShadow } from "../src/ui/textShadow"; // cross-platform text shadow
 
 const PALETTE = {
   kraft: "#F6EAD3",
@@ -79,17 +81,13 @@ export default function SeedPacket({
 
 const styles = StyleSheet.create({
   wrap: {
-    height: "100%",                // ⬅️ make packet fill its parent tile
+    height: "100%", // make packet fill its parent tile
     borderRadius: 16,
     backgroundColor: PALETTE.kraft,
     borderWidth: 1,
     borderColor: PALETTE.borderDark,
     overflow: "hidden",
-    shadowColor: "#000",
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 1,
+    ...cardShadow, // ✅ use helper (replaces shadowColor/Opacity/Radius/Offset/elevation)
   },
 
   /* corners */
@@ -117,7 +115,7 @@ const styles = StyleSheet.create({
   headerTitle: {
     marginTop: 2, color: PALETTE.ink, fontSize: 20, fontWeight: "900",
     letterSpacing: 0.6, textTransform: "uppercase",
-    textShadowColor: "rgba(0,0,0,0.06)", textShadowRadius: 2, textShadowOffset: { width: 0, height: 1 },
+    ...softTextShadow, // ✅ cross-platform text shadow
   },
   headerRow: { marginTop: 6, width: "100%", flexDirection: "row", alignItems: "center", gap: 8 },
   rule: { flex: 1, height: 2, borderRadius: 2 },
@@ -126,12 +124,12 @@ const styles = StyleSheet.create({
 
   /* body */
   bodyFrame: {
-    flex: 1,                        // ⬅️ grow to make the packet tall
+    flex: 1, // grow to make the packet tall
     backgroundColor: PALETTE.paper,
     paddingHorizontal: 10, paddingVertical: 8,
   },
   bodyInset: {
-    flex: 1,                        // ⬅️ content area also grows
+    flex: 1, // content area also grows
     backgroundColor: PALETTE.paper,
     borderWidth: 1, borderColor: PALETTE.border,
     borderRadius: 8,

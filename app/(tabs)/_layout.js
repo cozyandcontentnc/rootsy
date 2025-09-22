@@ -37,6 +37,9 @@ export default function TabsLayout() {
       <Tabs.Screen name="plants/bed/[bedId]" options={{ href: null }} />
       <Tabs.Screen name="plants/detail/[cropSlug]" options={{ href: null }} />
       <Tabs.Screen name="plants/search/[bedId]" options={{ href: null }} />
+      <Tabs.Screen name="plants/catalog" options={{ href: null }} />
+      <Tabs.Screen name="plants/public/[id]" options={{ href: null }} />
+      <Tabs.Screen name="plants/propose" options={{ href: null }} />
 
       {/* If you don't actually use plants/[slug], remove or keep hidden */}
       <Tabs.Screen name="plants/[slug]" options={{ href: null }} />

@@ -11,6 +11,7 @@ import {
   Pressable,
   TextInput,
   Alert,
+  useWindowDimensions,
 } from "react-native";
 import { useRouter } from "expo-router";
 import * as Location from "expo-location";
@@ -31,7 +32,7 @@ import {
   limit,
 } from "firebase/firestore";
 import SeedPacket from "../../components/SeedPacket";
-import { useWindowDimensions } from "react-native";
+import { smallShadow } from "../../src/ui/shadows"; // ← add shared shadow helper
 
 /** Theme */
 const C = {
@@ -649,11 +650,8 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: "#000",
-    shadowOpacity: 0.08,
-    shadowRadius: 2,
-    shadowOffset: { width: 0, height: 1 },
-    elevation: 1,
+    overflow: "hidden",      // keep Android ripple inside
+    ...smallShadow,          // ← web: boxShadow; native: shadow* + elevation
   },
   btnSeedPrimary: { backgroundColor: C.terracotta, borderColor: "#8F6F52" },
   btnSeedHollow: { backgroundColor: "#FFF8ED", borderColor: "#D2BDA6" },
@@ -670,12 +668,8 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingVertical: 6,
     paddingHorizontal: 12,
-    shadowColor: "#000",
-    shadowOpacity: 0.06,
-    shadowRadius: 1.5,
-    shadowOffset: { width: 0, height: 1 },
-    elevation: 1,
     maxWidth: "100%",
+    ...smallShadow,          // ← replace shadow* with helper
   },
   bedTagTxt: { color: C.text, fontWeight: "700", fontSize: 12, maxWidth: 180 },
 });

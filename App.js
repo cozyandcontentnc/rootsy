@@ -1,5 +1,12 @@
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View } from 'react-native';
+import { LogBox, Platform } from "react-native";
+
+// Silence noisy third-party cycles (you can widen/narrow this list)
+LogBox.ignoreLogs([
+  /Require cycle: .*@grpc\/grpc-js/,
+  /Require cycle: .*protobufjs/,
+]);
 
 export default function App() {
   return (
